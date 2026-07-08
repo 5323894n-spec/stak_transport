@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>АТП — планирование, наряды, путевые листы</title>
+<link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+<div id="login-screen">
+  <div class="login-box">
+    <h1>АТП: диспетчерская система</h1>
+    <div class="sub">Расписания · графики · наряды · путевые листы · табель · топливо · 1С · <b>сборка 1.1</b></div>
+    <label class="f">Имя пользователя<input id="lg-user" value="" autocomplete="username"></label>
+    <label class="f">Пароль<input id="lg-pass" type="password" autocomplete="current-password"></label>
+    <button class="btn" style="width:100%" onclick="doLogin()">Войти</button>
+    <div id="lg-err" style="color:#b91c1c; font-size:12.5px; margin-top:8px"></div>
+    <div class="muted" style="margin-top:14px">Демо-доступ: admin / admin<br>Роли: dispatcher, ekspl, kadry, buh, mech, med, fuel, dir — пароль 12345</div>
+  </div>
+</div>
+<div id="app">
+  <aside>
+    <div class="brand">АТП-система</div>
+    <nav id="nav"></nav>
+  </aside>
+  <main>
+    <div class="topbar">
+      <h2 id="page-title">Главная</h2>
+      <span id="notif-badge"></span>
+      <div class="userbox"><span id="user-name"></span><br><a href="#" onclick="logout();return false" style="color:var(--accent)">выйти</a></div>
+    </div>
+    <div class="content" id="content"></div>
+  </main>
+</div>
+<script src="/static/app.js?v=1.1"></script>
+</body>
+</html>

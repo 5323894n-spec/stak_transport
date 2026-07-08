@@ -1,0 +1,31 @@
+# Runtime data
+atp.db
+*.db
+*.sqlite
+*.sqlite3
+
+# Local server state
+*.pid
+*.log
+server-manual-check.*
+
+# Python caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Local environment
+.env
+.env.*
+.venv/
+venv/
+
+# Node / frontend build artifacts
+node_modules/
+dist/
+build/
+
+# Codex/Superpowers runtime scratch files
+.superpowers/
