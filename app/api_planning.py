@@ -4,7 +4,7 @@ import datetime, json
 from fastapi import APIRouter, Depends, HTTPException, Body
 from . import db, norms as N
 from .auth import current_user, require_write
-from .xl import xlsx_response
+from .xl import xlsx_response, order_xlsx_response
 
 router = APIRouter(prefix="/api")
 
@@ -1087,17 +1087,14 @@ def order_export(date: str, user=Depends(current_user)):
         o = db.one(con.execute("SELECT * FROM orders WHERE date=?", (date,)))
         if not o: raise HTTPException(404, "Наряда нет")
         lines = db.rows(con.execute(
-            "SELECT l.*, r.number rn, d.fio, d.tab_number, b.garage_number, b.plate FROM order_lines l "
+            "SELECT l.*, r.number rn, r.name route_name, d.fio, d.tab_number, b.garage_number, b.plate FROM order_lines l "
             "LEFT JOIN routes r ON r.id=l.route_id LEFT JOIN drivers d ON d.id=l.driver_id "
             "LEFT JOIN buses b ON b.id=l.bus_id WHERE l.order_id=? ORDER BY r.number, l.output_number, l.shift_number", (o["id"],)))
-        headers = ["Маршрут","Выход","Смена","Водитель","Таб.№","Автобус (гар.)","Госномер","Явка","Выезд",
-                   "Начало","Окончание","Заезд","Часы","Рейсов","Пробег, км","План. топливо, л","Статус"]
-        rows_ = [[l["rn"], l["output_number"], l["shift_number"], l["fio"], l["tab_number"], l["garage_number"],
-                  l["plate"], l["report_time"], l["depart_depot"], l["start_line"], l["end_line"], l["return_depot"],
-                  l["shift_hours"], l["trips_count"], l["distance_km"], l["planned_fuel"], l["status"]] for l in lines]
-        return xlsx_response(f"Наряд на {date}", headers, rows_, filename=f"naryad_{date}.xlsx")
+        settings = db.get_settings(con)
+        return order_xlsx_response(o, settings, lines, filename=f"naryad_{date}.xlsx")
     finally:
         con.close()
+
 
 
 
