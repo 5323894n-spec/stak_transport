@@ -19,6 +19,8 @@ CREATE TABLE IF NOT EXISTS repair_operations(id INTEGER PRIMARY KEY,order_id INT
 CREATE TABLE IF NOT EXISTS repair_parts(id INTEGER PRIMARY KEY,order_id INTEGER NOT NULL,operation_id INTEGER,part_id INTEGER NOT NULL,requested_qty REAL DEFAULT 0 CHECK(requested_qty>=0),reserved_qty REAL DEFAULT 0 CHECK(reserved_qty>=0),issued_qty REAL DEFAULT 0 CHECK(issued_qty>=0),installed_qty REAL DEFAULT 0 CHECK(installed_qty>=0),returned_qty REAL DEFAULT 0 CHECK(returned_qty>=0),unit_price REAL DEFAULT 0 CHECK(unit_price>=0),status TEXT DEFAULT 'запрошено',cancelled_reason TEXT,FOREIGN KEY(order_id) REFERENCES repair_orders(id) ON DELETE CASCADE,FOREIGN KEY(operation_id) REFERENCES repair_operations(id),FOREIGN KEY(part_id) REFERENCES parts(id));
 CREATE TABLE IF NOT EXISTS repair_inspections(id INTEGER PRIMARY KEY,order_id INTEGER NOT NULL,inspection_type TEXT NOT NULL,inspector_id INTEGER,inspected_at TEXT DEFAULT CURRENT_TIMESTAMP,result TEXT NOT NULL,release_allowed INTEGER DEFAULT 0 CHECK(release_allowed IN(0,1)),defects TEXT,comment TEXT,FOREIGN KEY(order_id) REFERENCES repair_orders(id) ON DELETE CASCADE,FOREIGN KEY(inspector_id) REFERENCES users(id));
 CREATE TABLE IF NOT EXISTS vehicle_repair_history(id INTEGER PRIMARY KEY,bus_id INTEGER NOT NULL,order_id INTEGER UNIQUE NOT NULL,request_number TEXT,order_number TEXT NOT NULL,repair_type TEXT,fault_category TEXT,opened_at TEXT,closed_at TEXT,odometer REAL CHECK(odometer IS NULL OR odometer>=0),result TEXT,operations_json TEXT DEFAULT '[]',workers_json TEXT DEFAULT '[]',parts_json TEXT DEFAULT '[]',total_cost REAL DEFAULT 0 CHECK(total_cost>=0),downtime_hours REAL DEFAULT 0 CHECK(downtime_hours>=0),snapshot_at TEXT DEFAULT CURRENT_TIMESTAMP,FOREIGN KEY(bus_id) REFERENCES buses(id),FOREIGN KEY(order_id) REFERENCES repair_orders(id));
+CREATE TABLE IF NOT EXISTS vehicle_incidents(id INTEGER PRIMARY KEY,bus_id INTEGER NOT NULL,incident_type TEXT NOT NULL CHECK(incident_type IN('ДТП','повреждение','вандализм','страховой случай')),occurred_at TEXT NOT NULL,place TEXT,route_id INTEGER,waybill_id INTEGER,driver_id INTEGER,circumstances TEXT NOT NULL,participants TEXT,other_vehicle TEXT,fault_status TEXT DEFAULT 'не установлена',police_document_number TEXT,insurer TEXT,insurance_case_number TEXT,responsible_user_id INTEGER,status TEXT DEFAULT 'зарегистрировано',estimated_damage_cost REAL DEFAULT 0 CHECK(estimated_damage_cost>=0),actual_damage_cost REAL DEFAULT 0 CHECK(actual_damage_cost>=0),repair_request_id INTEGER,repair_order_id INTEGER,comment TEXT,created_by INTEGER,created_at TEXT DEFAULT CURRENT_TIMESTAMP,updated_at TEXT,cancelled_at TEXT,cancel_reason TEXT,FOREIGN KEY(bus_id) REFERENCES buses(id),FOREIGN KEY(route_id) REFERENCES routes(id),FOREIGN KEY(waybill_id) REFERENCES waybills(id),FOREIGN KEY(driver_id) REFERENCES drivers(id),FOREIGN KEY(responsible_user_id) REFERENCES users(id),FOREIGN KEY(repair_request_id) REFERENCES repair_requests(id),FOREIGN KEY(repair_order_id) REFERENCES repair_orders(id),FOREIGN KEY(created_by) REFERENCES users(id));
+CREATE TABLE IF NOT EXISTS vehicle_damages(id INTEGER PRIMARY KEY,incident_id INTEGER NOT NULL,area TEXT NOT NULL,description TEXT NOT NULL,severity TEXT DEFAULT 'средняя' CHECK(severity IN('незначительная','средняя','тяжёлая','критическая')),repair_required INTEGER DEFAULT 1 CHECK(repair_required IN(0,1)),resolved INTEGER DEFAULT 0 CHECK(resolved IN(0,1)),resolved_at TEXT,repair_order_id INTEGER,comment TEXT,FOREIGN KEY(incident_id) REFERENCES vehicle_incidents(id) ON DELETE CASCADE,FOREIGN KEY(repair_order_id) REFERENCES repair_orders(id));
 CREATE TABLE IF NOT EXISTS repair_attachments(id INTEGER PRIMARY KEY,request_id INTEGER,order_id INTEGER,bus_id INTEGER NOT NULL,category TEXT,original_name TEXT NOT NULL,stored_name TEXT UNIQUE NOT NULL,mime_type TEXT NOT NULL,size_bytes INTEGER CHECK(size_bytes>=0),uploaded_by INTEGER,uploaded_at TEXT DEFAULT CURRENT_TIMESTAMP,FOREIGN KEY(request_id) REFERENCES repair_requests(id),FOREIGN KEY(order_id) REFERENCES repair_orders(id),FOREIGN KEY(bus_id) REFERENCES buses(id),FOREIGN KEY(uploaded_by) REFERENCES users(id));
 CREATE TABLE IF NOT EXISTS maintenance_plans(id INTEGER PRIMARY KEY,bus_id INTEGER NOT NULL,repair_type_id INTEGER NOT NULL,name TEXT NOT NULL,interval_days INTEGER CHECK(interval_days IS NULL OR interval_days>0),interval_km REAL CHECK(interval_km IS NULL OR interval_km>0),last_date TEXT,last_odometer REAL CHECK(last_odometer IS NULL OR last_odometer>=0),next_date TEXT,next_odometer REAL CHECK(next_odometer IS NULL OR next_odometer>=0),warning_days INTEGER DEFAULT 7 CHECK(warning_days>=0),warning_km REAL DEFAULT 500 CHECK(warning_km>=0),active INTEGER DEFAULT 1 CHECK(active IN(0,1)),UNIQUE(bus_id,repair_type_id),FOREIGN KEY(bus_id) REFERENCES buses(id),FOREIGN KEY(repair_type_id) REFERENCES repair_types(id));
 CREATE TABLE IF NOT EXISTS maintenance_events(id INTEGER PRIMARY KEY,plan_id INTEGER NOT NULL,bus_id INTEGER NOT NULL,due_date TEXT,due_odometer REAL CHECK(due_odometer IS NULL OR due_odometer>=0),status TEXT DEFAULT 'запланировано',request_id INTEGER,order_id INTEGER,completed_at TEXT,created_at TEXT DEFAULT CURRENT_TIMESTAMP,FOREIGN KEY(plan_id) REFERENCES maintenance_plans(id),FOREIGN KEY(bus_id) REFERENCES buses(id),FOREIGN KEY(request_id) REFERENCES repair_requests(id),FOREIGN KEY(order_id) REFERENCES repair_orders(id));
@@ -26,10 +28,31 @@ CREATE TABLE IF NOT EXISTS stock_movements(id INTEGER PRIMARY KEY,number TEXT UN
 CREATE INDEX IF NOT EXISTS idx_repair_requests_vehicle ON repair_requests(bus_id); CREATE INDEX IF NOT EXISTS idx_repair_requests_status ON repair_requests(status); CREATE INDEX IF NOT EXISTS idx_repair_requests_fault_category ON repair_requests(fault_category_id); CREATE INDEX IF NOT EXISTS idx_repair_requests_created ON repair_requests(created_at);
 CREATE INDEX IF NOT EXISTS idx_repair_orders_vehicle ON repair_orders(bus_id); CREATE INDEX IF NOT EXISTS idx_repair_orders_status ON repair_orders(status); CREATE INDEX IF NOT EXISTS idx_repair_orders_master ON repair_orders(responsible_master_id); CREATE INDEX IF NOT EXISTS idx_repair_orders_dates ON repair_orders(planned_start,planned_end); CREATE INDEX IF NOT EXISTS idx_repair_status_events_order ON repair_order_status_events(order_id,entered_at);
 CREATE INDEX IF NOT EXISTS idx_repair_workers_worker ON repair_order_workers(worker_id,status); CREATE INDEX IF NOT EXISTS idx_repair_operations_order ON repair_operations(order_id,status); CREATE INDEX IF NOT EXISTS idx_repair_parts_order ON repair_parts(order_id,status); CREATE INDEX IF NOT EXISTS idx_repair_inspections_order ON repair_inspections(order_id,inspected_at); CREATE INDEX IF NOT EXISTS idx_repair_history_vehicle ON vehicle_repair_history(bus_id,closed_at); CREATE INDEX IF NOT EXISTS idx_repair_attachments_vehicle ON repair_attachments(bus_id); CREATE INDEX IF NOT EXISTS idx_maintenance_events_due_date ON maintenance_events(due_date,status); CREATE INDEX IF NOT EXISTS idx_stock_movements_part_date ON stock_movements(part_id,movement_date);
+CREATE INDEX IF NOT EXISTS idx_vehicle_incidents_bus_date ON vehicle_incidents(bus_id,occurred_at); CREATE INDEX IF NOT EXISTS idx_vehicle_incidents_order ON vehicle_incidents(repair_order_id); CREATE INDEX IF NOT EXISTS idx_vehicle_damages_incident ON vehicle_damages(incident_id,resolved);
 """
 
 BUS_MIGRATIONS = [("buses","modification","TEXT"),("buses","commissioned_at","TEXT"),("buses","body_number","TEXT"),("buses","engine_number","TEXT"),("buses","engine_type","TEXT"),("buses","ecological_class","TEXT"),("buses","assigned_route_id","INTEGER REFERENCES routes(id)"),("buses","last_to_date","TEXT"),("buses","warranty_status","TEXT"),("buses","photo_path","TEXT")]
+CARD_MIGRATIONS = [
+    ("repair_attachments", "incident_id", "INTEGER REFERENCES vehicle_incidents(id)"),
+    ("repair_attachments", "damage_id", "INTEGER REFERENCES vehicle_damages(id)"),
+    ("repair_attachments", "caption", "TEXT"),
+    ("repair_attachments", "captured_at", "TEXT"),
+    ("repair_attachments", "is_cover", "INTEGER DEFAULT 0 CHECK(is_cover IN(0,1))"),
+    ("repair_attachments", "cancelled_at", "TEXT"),
+    ("repair_attachments", "cancel_reason", "TEXT"),
+    ("vehicle_repair_history", "labor_cost", "REAL DEFAULT 0"),
+    ("vehicle_repair_history", "parts_cost", "REAL DEFAULT 0"),
+    ("vehicle_repair_history", "external_cost", "REAL DEFAULT 0"),
+    ("vehicle_repair_history", "other_cost", "REAL DEFAULT 0"),
+    ("vehicle_repair_history", "master_name", "TEXT"),
+]
 REFERENCE_DATA = {"repair_types":[("TR","Текущий ремонт"),("TO1","ТО-1"),("TO2","ТО-2"),("KR","Капитальный ремонт")],"fault_categories":[("ENGINE","Двигатель"),("BRAKES","Тормозная система"),("ELECTRIC","Электрооборудование"),("BODY","Кузов")],"vehicle_systems":[("ENGINE","Двигатель"),("TRANSMISSION","Трансмиссия"),("BRAKES","Тормозная система"),("ELECTRIC","Электрооборудование")],"workshops":[("MAIN","Основная ремонтная зона")],"warehouses":[("MAIN","Основной склад")]}
+
+def add_missing_columns(con, migrations):
+    for table, column, definition in migrations:
+        columns = {row[1] for row in con.execute(f"PRAGMA table_info({table})")}
+        if column not in columns:
+            con.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
 def seed_repair_refs(con):
     for table, rows in REFERENCE_DATA.items():
@@ -39,8 +62,9 @@ def seed_repair_refs(con):
 
 def migrate_repairs(con):
     con.executescript(REPAIR_SCHEMA)
-    for table, column, definition in BUS_MIGRATIONS:
-        if column not in {row[1] for row in con.execute(f"PRAGMA table_info({table})")}:
-            con.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+    add_missing_columns(con, BUS_MIGRATIONS)
+    add_missing_columns(con, CARD_MIGRATIONS)
+    con.execute("CREATE INDEX IF NOT EXISTS idx_repair_attachments_incident ON repair_attachments(incident_id)")
+    con.execute("CREATE INDEX IF NOT EXISTS idx_repair_attachments_cover ON repair_attachments(bus_id,is_cover,cancelled_at)")
     con.execute("INSERT INTO repair_order_status_events(order_id,status,entered_at) SELECT ro.id,ro.status,COALESCE(ro.updated_at,ro.created_at,CURRENT_TIMESTAMP) FROM repair_orders ro WHERE NOT EXISTS (SELECT 1 FROM repair_order_status_events e WHERE e.order_id=ro.id)")
     seed_repair_refs(con)
