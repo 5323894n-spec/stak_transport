@@ -4,7 +4,8 @@ import datetime
 import html
 import io
 
-from fastapi import APIRouter, Depends, HTTPException
+from urllib.parse import quote
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse, StreamingResponse
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
@@ -161,7 +162,10 @@ def render_vehicle_dossier(data):
     v, s = data["vehicle"], data["summary"]
     period = " — ".join(x for x in (s["date_from"], s["date_to"]) if x) or "за всё время"
     cover = next((item for item in data["media"] if item["is_cover"]), None)
-    cover_html = f"<img class='cover' src='{_e(cover['download_url'])}' alt='Фото автобуса'>" if cover else ""
+    cover_url = cover["download_url"] if cover else ""
+    if cover_url and data.get("download_token"):
+        cover_url += "?token=" + quote(data["download_token"], safe="")
+    cover_html = f"<img class='cover' src='{_e(cover_url)}' alt='Фото автобуса'>" if cover else ""
     repairs = _html_table(
         ["Заказ-наряд", "Дата", "Вид", "Статус", "Ответственный мастер", "Результат", "Стоимость"],
         ([r["order_number"], r["created_at"], r["repair_type_name"], r["status"], r["master_name"], r["result"], r["total_cost"]] for r in data["repairs"]),
@@ -254,11 +258,15 @@ def build_vehicle_workbook(data):
 
 
 @router.get("/{bus_id}/print", response_class=HTMLResponse)
-def print_vehicle_card(bus_id: int, date_from: str = "", date_to: str = "", user=Depends(current_user)):
+def print_vehicle_card(bus_id: int, request: Request, date_from: str = "", date_to: str = "", user=Depends(current_user)):
     require_repair_action(user, "read_reports")
     con = db.connect()
     try:
         data = collect_vehicle_dossier(con, bus_id, date_from, date_to)
+        auth = request.headers.get("Authorization", "")
+        data["download_token"] = request.query_params.get("token") or (
+            auth[7:] if auth.startswith("Bearer ") else ""
+        )
         audit_change(
             con, user, "печать технического досье автобуса", "vehicle_dossier",
             bus_id, new={"date_from": date_from, "date_to": date_to},

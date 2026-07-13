@@ -7,12 +7,22 @@ from tests.test_repair_operations_api import create_order
 from tests.test_repair_requests_api import make_client
 
 
-def test_vehicle_dossier_print_contains_required_sections(tmp_path):
+def test_vehicle_dossier_print_contains_required_sections(tmp_path, monkeypatch):
+    monkeypatch.setenv("ATP_REPAIR_UPLOADS", str(tmp_path / "uploads"))
     client, bus_id = make_client(tmp_path)
     create_order(client, bus_id)
+    uploaded = client.post(
+        f"/api/repairs/vehicles/{bus_id}/media",
+        files={"file": ("cover.jpg", b"\xff\xd8\xff cover", "image/jpeg")},
+    )
+    assert uploaded.status_code == 201, uploaded.text
+    assert client.post(
+        f"/api/repairs/media/{uploaded.json()['id']}/cover"
+    ).status_code == 200
+    token = client.headers["Authorization"].removeprefix("Bearer ")
     response = client.get(
         f"/api/repairs/vehicles/{bus_id}/print"
-        "?date_from=2026-01-01&date_to=2026-12-31"
+        f"?date_from=2026-01-01&date_to=2026-12-31&token={token}"
     )
     assert response.status_code == 200, response.text
     for text in (
@@ -25,6 +35,7 @@ def test_vehicle_dossier_print_contains_required_sections(tmp_path):
     ):
         assert text in response.text
     assert "@media print" in response.text
+    assert f"/download?token={token}" in response.text
 
 
 def test_vehicle_dossier_excel_has_all_sheets_and_money_formats(tmp_path):
