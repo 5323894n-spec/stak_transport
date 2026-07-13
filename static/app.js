@@ -87,12 +87,14 @@ function buildNav() {
   }).join("");
 }
 function route() {
-  const view = (location.hash || "#/dashboard").slice(2) || "dashboard";
+  const parts = (location.hash || "#/dashboard").slice(2).split("/");
+  const view = parts[0] || "dashboard";
+  const args = parts.slice(1).map(decodeURIComponent);
   document.querySelectorAll("#nav a").forEach(a => a.classList.toggle("active", a.dataset.view === view));
-  $("page-title").textContent = TITLES[view] || view;
+  $("page-title").textContent = TITLES[view] || (view === "vehicleCard" ? "Карточка автобуса" : view);
   const fn = VIEWS[view] || VIEWS.dashboard;
   $("content").innerHTML = "<div class='muted'>Загрузка…</div>";
-  fn().catch(e => { $("content").innerHTML = `<div class="vio"><b>Ошибка</b>${esc(e.message)}</div>`; });
+  fn(...args).catch(e => { $("content").innerHTML = `<div class="vio"><b>Ошибка</b>${esc(e.message)}</div>`; });
 }
 window.addEventListener("hashchange", route);
 
@@ -194,10 +196,9 @@ function violList(violations) {
 /* ================= ГЛАВНАЯ ================= */
 const VIEWS = {};
 async function repairVehicleCard(busId) {
-  const d = await api(`/api/repairs/vehicles/${busId}/card`);
-  const history = (d.history || []).map(x => `<tr><td>${esc(x.order_number)}</td><td>${esc(x.closed_at || "")}</td><td>${esc(x.result || "")}</td><td>${esc(x.total_cost || 0)}</td><td>${esc(x.downtime_hours || 0)}</td></tr>`).join("");
-  await modal(`<h3>Карточка автобуса ${esc(d.vehicle.garage_number)}</h3><div class="cards"><div class="card"><div class="num">${d.totals.repairs}</div><div class="lbl">ремонтов</div></div><div class="card"><div class="num">${d.totals.cost}</div><div class="lbl">затраты</div></div><div class="card"><div class="num">${d.totals.downtime_hours}</div><div class="lbl">часов простоя</div></div></div>${tbl(["Заказ-наряд", "Закрыт", "Результат", "Стоимость", "Простой"], history || `<tr><td colspan="5" class="muted">История пока пуста</td></tr>`)}<div class="foot"><button class="btn sec" data-act="cancel">Закрыть</button></div>`);
+  openVehicleCard(busId);
 }
+VIEWS.vehicleCard = async (...args) => window.vehicleCardView(...args);
 async function repairMaintenancePlan() {
   const refs = await api("/api/repairs/references");
   const v = await formModal("Плановое ТО", [
@@ -400,7 +401,7 @@ VIEWS.repairs = async function () {
   const calendarEvents = calendarData.items || [], calendarRows = calendarEvents.map(e => `<tr><td>${stBadge(e.event_type)}</td><td>${esc(e.start || "")}${e.end && e.end !== e.start ? `<br><span class="muted">до ${esc(e.end)}</span>` : ""}</td><td>${esc(e.garage_number || "")} ${esc(e.plate || "")}</td><td>${esc(e.order_number || e.title || "")}</td><td>${stBadge(e.status || "")}</td></tr>`).join("");
   const active = items.filter(x => !["отменена", "закрыта"].includes(x.status));
   const rows = items.map(r => `<tr><td><b>${esc(r.request_number)}</b><br><span class="muted">${esc(r.created_at || "")}</span></td><td>${esc(r.garage_number || "")}<br><span class="muted">${esc(r.plate || "")} ${esc(r.brand || "")} ${esc(r.model || "")}</span></td><td>${r.repeated ? `<span class="badge b-err">Повторная неисправность</span><br>` : ""}${esc(r.fault_description)}</td><td>${esc(r.odometer)}</td><td>${stBadge(r.criticality)}</td><td>${stBadge(r.status)}</td><td>${r.status === "новая" ? `<button class="btn small" onclick="repairCreateOrder(${r.id},${r.vehicle_id})">Создать заказ-наряд</button> <button class="btn small sec" onclick="repairCancelRequest(${r.id})">Отменить</button>` : ""}</td></tr>`).join("");
-  $("content").innerHTML = `<div class="toolbar"><button class="btn" onclick="repairNewRequest()">Создать заявку</button><button class="btn sec" onclick="repairMaintenancePlan()">Плановое ТО</button><button class="btn sec" onclick="repairEvaluateMaintenance()">Проверить сроки ТО</button><button class="btn sec" onclick="repairEvaluateAlerts()">Проверить уведомления</button><button class="btn sec" onclick="repairReportExport()">Отчёт ремонта Excel</button><button class="btn sec" onclick="route()">Обновить</button></div><div class="cards"><div class="card"><div class="num">${items.length}</div><div class="lbl">всего заявок</div></div><div class="card ${active.length ? "warn" : "ok"}"><div class="num">${active.length}</div><div class="lbl">Активные ремонты</div></div></div><div class="panel"><h3>Заявки на ремонт и ТО</h3>${tbl(["Заявка", "Автобус", "Неисправность", "Пробег", "Критичность", "Статус", "Действия"], rows || `<tr><td colspan="7" class="muted">Заявок пока нет</td></tr>`)}</div>`;
+  $("content").innerHTML = `<div class="toolbar"><button class="btn" onclick="repairNewRequest()">Создать заявку</button><button class="btn sec" onclick="repairMaintenancePlan()">Плановое ТО</button><button class="btn sec" onclick="repairEvaluateMaintenance()">Проверить сроки ТО</button><button class="btn sec" onclick="repairEvaluateAlerts()">Проверить уведомления</button><button class="btn sec" onclick="repairReportExport()">Отчёт ремонта Excel</button><select aria-label="Открыть карточку автобуса" onchange="if(this.value)openVehicleCard(this.value)"><option value="">Карточка автобуса…</option>${REFS.buses.map(b => `<option value="${b.id}">${esc(b.garage_number)} · ${esc(b.plate || "")}</option>`).join("")}</select><button class="btn sec" onclick="route()">Обновить</button></div><div class="cards"><div class="card"><div class="num">${items.length}</div><div class="lbl">всего заявок</div></div><div class="card ${active.length ? "warn" : "ok"}"><div class="num">${active.length}</div><div class="lbl">Активные ремонты</div></div></div><div class="panel"><h3>Заявки на ремонт и ТО</h3>${tbl(["Заявка", "Автобус", "Неисправность", "Пробег", "Критичность", "Статус", "Действия"], rows || `<tr><td colspan="7" class="muted">Заявок пока нет</td></tr>`)}</div>`;
   $("content").innerHTML += `<div class="cards"><div class="card"><div class="num">${repairKpi.active_orders}</div><div class="lbl">активных заказов</div></div><div class="card ${repairKpi.overdue_orders ? "err" : "ok"}"><div class="num">${repairKpi.overdue_orders}</div><div class="lbl">просрочено</div></div><div class="card"><div class="num">${repairKpi.closed_orders}</div><div class="lbl">закрыто ремонтов</div></div><div class="card"><div class="num">${repairKpi.closed_cost}</div><div class="lbl">затраты по закрытым</div></div></div><div class="panel"><h3>Канбан ремонта</h3><div class="toolbar">${Object.entries(repairKpi.kanban).map(([status, rows]) => `<span class="badge b-mut">${esc(status)}: ${rows.length}</span>`).join("")}</div></div>`;
   $("content").innerHTML += `<div class="cards"><div class="card ${repairMetrics.readiness_coefficient < 0.9 ? "warn" : "ok"}"><div class="num">${(repairMetrics.readiness_coefficient * 100).toFixed(1)}%</div><div class="lbl">Коэффициент технической готовности</div></div><div class="card"><div class="num">${repairMetrics.available_buses} / ${repairMetrics.fleet_total}</div><div class="lbl">доступно автобусов</div></div><div class="card"><div class="num">${repairMetrics.total_stage_hours}</div><div class="lbl">часов простоя по этапам</div></div></div><div class="panel"><h3>Простой по этапам</h3><div class="toolbar">${Object.entries(repairMetrics.stage_hours).map(([status, hours]) => `<span class="badge b-mut">${esc(status)}: ${hours} ч</span>`).join("") || `<span class="muted">Данных о простое пока нет</span>`}</div></div>`;
   $("content").innerHTML += `<div class="panel"><h3>Календарь ремонтов и ТО</h3>${tbl(["Событие", "Дата", "Автобус", "Документ / работа", "Статус"], calendarRows || `<tr><td colspan="5" class="muted">На ближайшие 30 дней событий нет</td></tr>`)}</div>`;
@@ -1466,7 +1467,13 @@ function refView(kind) {
   };
 }
 VIEWS.drivers = refView("drivers");
-VIEWS.buses = refView("buses");
+VIEWS.buses = async function () {
+  const q = window._q_buses || "";
+  const d = await api("/api/refs/buses?q=" + encodeURIComponent(q));
+  const cfg = REF_CFG.buses;
+  const rows = d.items.map(item => `<tr>${cfg.cols.map(([k, , fmt]) => `<td>${fmt ? fmt(item[k]) : esc(item[k])}</td>`).join("")}<td style="white-space:nowrap"><button class="btn small" onclick="openVehicleCard(${item.id})">Карточка</button> <button class="btn small ghost" onclick="refEdit('buses',${item.id})">изменить</button> <button class="btn small ghost" onclick="refDel('buses',${item.id})">✕</button></td></tr>`).join("");
+  $("content").innerHTML = `<div class="toolbar"><input style="min-width:330px" placeholder="Поиск по гаражному номеру, госномеру или VIN" value="${esc(q)}" onchange="_q_buses=this.value;route()"><button class="btn" onclick="refEdit('buses',0)">+ Добавить</button><button class="btn sec" onclick="openWin('/api/refs/buses/export.xlsx')">Экспорт в Excel</button><label class="btn sec">Импорт из Excel<input type="file" accept=".xlsx" style="display:none" onchange="refImport('buses',this)"></label><span class="muted">${d.items.length} записей</span></div>${tbl([...cfg.cols.map(c => c[1]), "Действия"], rows || `<tr><td colspan="${cfg.cols.length + 1}">Автобусы не найдены</td></tr>`)}`;
+};
 VIEWS.routes = refView("routes");
 async function refEdit(kind, id) {
   const cfg = REF_CFG[kind];
