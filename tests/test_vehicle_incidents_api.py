@@ -123,3 +123,31 @@ def test_incident_links_order_and_damage_can_be_resolved(tmp_path):
     assert resolved.json()["resolved"] == 1
     assert resolved.json()["resolved_at"]
     assert resolved.json()["repair_order_id"] == order["id"]
+
+def test_incident_rejects_order_from_another_bus(tmp_path):
+    client, first_bus = make_client(tmp_path)
+    import app.db as db
+
+    con = db.connect()
+    try:
+        second_bus = con.execute(
+            "INSERT INTO buses(garage_number,plate,odometer) VALUES(?,?,?)",
+            ("Р-303", "А303АА69", 33000),
+        ).lastrowid
+        con.commit()
+    finally:
+        con.close()
+    payload = incident_payload()
+    payload["create_repair_request"] = False
+    payload["damages"] = []
+    incident = client.post(
+        f"/api/repairs/vehicles/{first_bus}/incidents", json=payload
+    ).json()
+    other_order = create_order(client, second_bus)
+
+    linked = client.patch(
+        f"/api/repairs/incidents/{incident['id']}",
+        json={"repair_order_id": other_order["id"]},
+    )
+    assert linked.status_code == 409
+    assert "другому автобусу" in linked.json()["detail"]

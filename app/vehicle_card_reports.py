@@ -12,7 +12,7 @@ from openpyxl.utils import get_column_letter
 
 from . import db
 from .auth import current_user
-from .repair_service import require_repair_action
+from .repair_service import audit_change, require_repair_action
 
 router = APIRouter(prefix="/api/repairs/vehicles", tags=["vehicle-card-reports"])
 HEADER = PatternFill("solid", fgColor="17365D")
@@ -259,6 +259,11 @@ def print_vehicle_card(bus_id: int, date_from: str = "", date_to: str = "", user
     con = db.connect()
     try:
         data = collect_vehicle_dossier(con, bus_id, date_from, date_to)
+        audit_change(
+            con, user, "печать технического досье автобуса", "vehicle_dossier",
+            bus_id, new={"date_from": date_from, "date_to": date_to},
+        )
+        con.commit()
     finally:
         con.close()
     return HTMLResponse(render_vehicle_dossier(data))
@@ -270,6 +275,11 @@ def export_vehicle_card(bus_id: int, date_from: str = "", date_to: str = "", use
     con = db.connect()
     try:
         data = collect_vehicle_dossier(con, bus_id, date_from, date_to)
+        audit_change(
+            con, user, "экспорт технического досье автобуса", "vehicle_dossier",
+            bus_id, new={"date_from": date_from, "date_to": date_to},
+        )
+        con.commit()
     finally:
         con.close()
     stream = build_vehicle_workbook(data)
