@@ -27,6 +27,7 @@ from .repair_print import router as repair_print_router
 from .api_repair_repeats import router as repair_repeats_router
 from .api_repair_alerts import router as repair_alerts_router
 from .api_vehicle_incidents import router as vehicle_incidents_router
+from .api_vehicle_media import router as vehicle_media_router
 
 app = FastAPI(title="АТП — планирование и путевые листы", version="1.0")
 
@@ -86,6 +87,7 @@ app.include_router(repair_print_router)
 app.include_router(repair_repeats_router)
 app.include_router(repair_alerts_router)
 app.include_router(vehicle_incidents_router)
+app.include_router(vehicle_media_router)
 
 STATIC = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "static")
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
