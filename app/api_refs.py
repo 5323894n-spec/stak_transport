@@ -401,6 +401,14 @@ def settings_get(user=Depends(current_user)):
 @router.post("/settings")
 def settings_set(payload: dict = Body(...), user=Depends(current_user)):
     if user["role"] != "админ": raise HTTPException(403, "Только администратор")
+    if "repair_repeat_days" in payload:
+        try:
+            repeat_days = int(payload["repair_repeat_days"])
+        except (TypeError, ValueError):
+            raise HTTPException(400, "Период повторной неисправности должен быть целым числом")
+        if not 1 <= repeat_days <= 365:
+            raise HTTPException(400, "Период повторной неисправности должен быть от 1 до 365 дней")
+        payload["repair_repeat_days"] = repeat_days
     con = db.connect()
     try:
         for k, v in payload.items():

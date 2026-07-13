@@ -116,3 +116,18 @@ label.f > * { display: block; width: 100%; margin-top: 3px; color: var(--text); 
 }
 
 
+
+.summary-toolbar { gap: 10px; align-items: center; flex-wrap: wrap; }
+.summary-kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 10px; margin: 12px 0; }
+.summary-kpis > div { border: 1px solid #cbd8e6; border-radius: 8px; padding: 10px 12px; background: #fff; }
+.summary-kpis b { display: block; font-size: 22px; color: #17365d; }
+.summary-kpis span { color: #607087; font-size: 12px; }
+.table-scroll { overflow: auto; max-width: 100%; }
+.summary-table { width: 100%; border-collapse: collapse; font-size: 13px; background: #fff; }
+.summary-table th { background: #17365d; color: #fff; text-align: left; padding: 8px; position: sticky; top: 0; z-index: 1; }
+.summary-table td { border: 1px solid #d8e2ee; padding: 6px 8px; vertical-align: top; }
+.sum-ok { background: #e8f7ef; }
+.sum-info { background: #eaf3ff; }
+.sum-warning, .sum-row-error { background: #fff3cd; }
+.sum-error { background: #ffe5d0; }
+.sum-critical { background: #f8d7da; }

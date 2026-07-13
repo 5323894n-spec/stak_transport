@@ -10,6 +10,21 @@ from .api_refs import router as refs_router
 from .api_planning import router as planning_router
 from .api_waybills import router as waybills_router
 from .api_time import router as time_router
+from .api_summary import router as summary_router
+from .api_repairs import router as repairs_router
+from .api_repair_orders import router as repair_orders_router
+from .api_repair_work import router as repair_work_router
+from .api_repair_control import router as repair_control_router
+from .api_repair_stock import router as repair_stock_router
+from .api_repair_stock_extra import router as repair_stock_extra_router
+from .api_repair_maintenance import router as repair_maintenance_router
+from .api_repair_dashboard import router as repair_dashboard_router
+from .repair_reports import router as repair_reports_router
+from .api_repair_attachments import router as repair_attachments_router
+from .api_repair_workers import router as repair_workers_router
+from .repair_print import router as repair_print_router
+from .api_repair_repeats import router as repair_repeats_router
+from .api_repair_alerts import router as repair_alerts_router
 
 app = FastAPI(title="АТП — планирование и путевые листы", version="1.0")
 
@@ -52,6 +67,21 @@ app.include_router(refs_router)
 app.include_router(planning_router)
 app.include_router(waybills_router)
 app.include_router(time_router)
+app.include_router(summary_router)
+app.include_router(repairs_router)
+app.include_router(repair_orders_router)
+app.include_router(repair_work_router)
+app.include_router(repair_control_router)
+app.include_router(repair_stock_router)
+app.include_router(repair_stock_extra_router)
+app.include_router(repair_maintenance_router)
+app.include_router(repair_dashboard_router)
+app.include_router(repair_reports_router)
+app.include_router(repair_attachments_router)
+app.include_router(repair_workers_router)
+app.include_router(repair_print_router)
+app.include_router(repair_repeats_router)
+app.include_router(repair_alerts_router)
 
 STATIC = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "static")
 app.mount("/static", StaticFiles(directory=STATIC), name="static")

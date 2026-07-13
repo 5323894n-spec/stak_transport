@@ -6,6 +6,7 @@ from fastapi.responses import HTMLResponse
 from . import db, norms as N
 from .auth import current_user, require_write
 from .xl import xlsx_response
+from .repair_service import vehicle_release_block_reason
 
 router = APIRouter(prefix="/api")
 
@@ -59,6 +60,9 @@ def tech_create(payload: dict = Body(...), user=Depends(current_user)):
     require_write(user, "tech")
     con = db.connect()
     try:
+        if payload.get("result", "выпуск разрешен") == "выпуск разрешен":
+            reason = vehicle_release_block_reason(con, payload["bus_id"])
+            if reason: raise HTTPException(409, reason)
         cur = con.execute(
             "INSERT INTO tech_checks(bus_id,date,time,result,odometer,notes,mechanic_name,comment) VALUES(?,?,?,?,?,?,?,?)",
             (payload["bus_id"], payload.get("date") or datetime.date.today().isoformat(),
@@ -113,6 +117,9 @@ def waybill_check(con, line, mode=None):
     """Проверка возможности оформления ПЛ: problems блокируют, warnings только предупреждают."""
     mode = mode or waybill_issue_mode(con)
     problems, warnings = [], []
+    if line and line["bus_id"]:
+        repair_reason = vehicle_release_block_reason(con, line["bus_id"])
+        if repair_reason: problems.append(repair_reason)
     med = tech = None
     if not line:
         return {"mode": mode, "problems": ["Строка наряда не найдена"], "warnings": [], "medical": None, "tech": None}

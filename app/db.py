@@ -2,6 +2,8 @@
 """База данных SQLite: схема, подключение, аудит."""
 import sqlite3, json, os, datetime
 
+from .repair_schema import migrate_repairs
+
 DB_PATH = os.environ.get("ATP_DB", os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "atp.db"))
 
 def connect():
@@ -112,6 +114,76 @@ CREATE TABLE IF NOT EXISTS order_lines(
   dispatcher_note TEXT, status TEXT DEFAULT 'план',
   FOREIGN KEY(order_id) REFERENCES orders(id) ON DELETE CASCADE);
 
+CREATE TABLE IF NOT EXISTS summary_schedules(
+  id INTEGER PRIMARY KEY,
+  schedule_date TEXT,
+  period_start TEXT NOT NULL,
+  period_end TEXT NOT NULL,
+  day_type TEXT,
+  status TEXT DEFAULT 'сформировано',
+  created_by TEXT,
+  created_at TEXT,
+  updated_at TEXT,
+  routes_count INTEGER DEFAULT 0,
+  trips_count INTEGER DEFAULT 0,
+  runs_count INTEGER DEFAULT 0,
+  vehicles_count INTEGER DEFAULT 0,
+  drivers_count INTEGER DEFAULT 0,
+  errors_count INTEGER DEFAULT 0,
+  warnings_count INTEGER DEFAULT 0,
+  filters_json TEXT DEFAULT '{}',
+  comment TEXT,
+  excel_file_path TEXT);
+
+CREATE TABLE IF NOT EXISTS summary_schedule_lines(
+  id INTEGER PRIMARY KEY,
+  summary_schedule_id INTEGER NOT NULL,
+  service_date TEXT NOT NULL,
+  route_id INTEGER,
+  route_number TEXT,
+  route_name TEXT,
+  direction TEXT,
+  run_number INTEGER,
+  shift_number INTEGER,
+  trip_number INTEGER,
+  vehicle_id INTEGER,
+  vehicle_number TEXT,
+  garage_number TEXT,
+  driver_id INTEGER,
+  driver_tab_number TEXT,
+  driver_name TEXT,
+  departure_time TEXT,
+  arrival_time TEXT,
+  trip_duration INTEGER DEFAULT 0,
+  depot_departure_time TEXT,
+  depot_return_time TEXT,
+  distance_km REAL DEFAULT 0,
+  day_type TEXT,
+  schedule_version TEXT,
+  status TEXT DEFAULT 'действует',
+  error_flag INTEGER DEFAULT 0,
+  comment TEXT,
+  FOREIGN KEY(summary_schedule_id) REFERENCES summary_schedules(id) ON DELETE CASCADE);
+
+CREATE TABLE IF NOT EXISTS summary_schedule_errors(
+  id INTEGER PRIMARY KEY,
+  summary_schedule_id INTEGER NOT NULL,
+  line_id INTEGER,
+  level TEXT NOT NULL,
+  route_number TEXT,
+  run_number INTEGER,
+  trip_number INTEGER,
+  object_type TEXT,
+  object_label TEXT,
+  message TEXT NOT NULL,
+  recommendation TEXT,
+  created_at TEXT,
+  FOREIGN KEY(summary_schedule_id) REFERENCES summary_schedules(id) ON DELETE CASCADE,
+  FOREIGN KEY(line_id) REFERENCES summary_schedule_lines(id) ON DELETE CASCADE);
+
+CREATE INDEX IF NOT EXISTS idx_summary_lines_summary ON summary_schedule_lines(summary_schedule_id);
+CREATE INDEX IF NOT EXISTS idx_summary_lines_date_route ON summary_schedule_lines(service_date, route_id, run_number, shift_number);
+CREATE INDEX IF NOT EXISTS idx_summary_errors_summary ON summary_schedule_errors(summary_schedule_id);
 CREATE TABLE IF NOT EXISTS medical_checks(
   id INTEGER PRIMARY KEY, driver_id INTEGER NOT NULL, date TEXT, time TEXT,
   type TEXT DEFAULT 'предрейсовый', result TEXT DEFAULT 'допущен',
@@ -223,6 +295,7 @@ ORG_DEFAULTS = {
     "waybill_prefix": "",
     "waybill_issue_mode": "strict_med_tech",
     "session_timeout_min": "120",
+    "repair_repeat_days": "30",
 }
 
 MIGRATIONS = [
@@ -230,6 +303,11 @@ MIGRATIONS = [
     ("routes", "length_back_km", "REAL"),
     ("routes", "trip_time_back_min", "INTEGER"),
     ("roster", "break_min", "INTEGER DEFAULT 0"),
+    ("summary_schedules", "filters_json", "TEXT DEFAULT '{}'"),
+    ("summary_schedule_lines", "service_date", "TEXT"),
+    ("summary_schedule_lines", "vehicle_id", "INTEGER"),
+    ("summary_schedule_lines", "driver_id", "INTEGER"),
+    ("notifications", "source_key", "TEXT"),
 ]
 
 def migrate(con):
@@ -242,6 +320,8 @@ def init_db():
     con = connect()
     con.executescript(SCHEMA)
     migrate(con)
+    con.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_notifications_source_key ON notifications(source_key)")
+    migrate_repairs(con)
     if not con.execute("SELECT 1 FROM norms").fetchone():
         con.execute(
             "INSERT INTO norms(name, valid_from, valid_to, params, doc_ref, comment) VALUES(?,?,?,?,?,?)",

@@ -5,17 +5,22 @@ from fastapi import Request, HTTPException
 from . import db
 
 ROLES = ["админ", "диспетчер", "эксплуатация", "кадры", "бухгалтер",
-         "механик", "медик", "топливо", "руководитель", "водитель"]
+         "механик", "медик", "топливо", "руководитель", "водитель",
+         "мастер ремонта", "слесарь", "механик контроля", "склад"]
 
 # право на запись по разделам (упрощённая матрица; админ может всё)
 WRITE_ACCESS = {
-    "диспетчер": {"orders", "waybills", "roster"},
-    "эксплуатация": {"routes", "trips", "roster", "orders"},
+    "диспетчер": {"orders", "waybills", "roster", "summary"},
+    "эксплуатация": {"routes", "trips", "roster", "orders", "summary"},
     "кадры": {"drivers", "absences", "roster"},
     "бухгалтер": {"export1c", "timesheet"},
     "механик": {"tech", "buses"},
     "медик": {"medical"},
     "топливо": {"fuel", "buses"},
+    "мастер ремонта": {"repairs", "repair_orders"},
+    "слесарь": {"repair_work"},
+    "механик контроля": {"repair_inspections"},
+    "склад": {"repair_stock"},
 }
 
 def hash_password(password: str, salt: bytes = None) -> str:

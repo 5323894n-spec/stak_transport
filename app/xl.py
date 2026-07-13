@@ -256,3 +256,227 @@ def order_xlsx_response(order, settings, lines, filename="naryad.xlsx"):
 
     return _xlsx_download_response(wb, filename)
 
+
+SUMMARY_HEADER_FILL = PatternFill("solid", fgColor="17365D")
+SUMMARY_HEADER_FONT = Font(color="FFFFFF", bold=True)
+SUMMARY_BORDER = Border(
+    left=Side(style="thin", color="B7C9D9"),
+    right=Side(style="thin", color="B7C9D9"),
+    top=Side(style="thin", color="B7C9D9"),
+    bottom=Side(style="thin", color="B7C9D9"),
+)
+
+
+def _summary_write_table(ws, headers, rows):
+    ws.append(headers)
+    for cell in ws[1]:
+        cell.fill = SUMMARY_HEADER_FILL
+        cell.font = SUMMARY_HEADER_FONT
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        cell.border = SUMMARY_BORDER
+    for row in rows:
+        ws.append(row)
+    for row in ws.iter_rows(min_row=2):
+        for cell in row:
+            cell.alignment = Alignment(vertical="top", wrap_text=True)
+            cell.border = SUMMARY_BORDER
+    ws.freeze_panes = "A2"
+    ws.auto_filter.ref = ws.dimensions
+    for col in range(1, ws.max_column + 1):
+        letter = get_column_letter(col)
+        values = [ws.cell(row=row, column=col).value for row in range(1, ws.max_row + 1)]
+        width = min(42, max(10, max(len(str(v or "")) for v in values) + 2))
+        ws.column_dimensions[letter].width = width
+
+
+def summary_schedule_xlsx_response(settings, summary, views, lines, errors, filename="Сводное_расписание_за_период.xlsx"):
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Титульный лист"
+    org = settings.get("org_name", "")
+    period = summary["period_start"] if summary["period_start"] == summary["period_end"] else f"{summary['period_start']} — {summary['period_end']}"
+    ws["A1"] = org
+    ws["A2"] = "СВОДНОЕ РАСПИСАНИЕ"
+    ws["A3"] = f"Период: {period}"
+    ws["A4"] = f"Дата формирования: {summary.get('created_at') or ''}"
+    ws["A6"] = "Маршрутов"; ws["B6"] = summary["routes_count"]
+    ws["A7"] = "Рейсов"; ws["B7"] = summary["trips_count"]
+    ws["A8"] = "Выходов"; ws["B8"] = summary["runs_count"]
+    ws["A9"] = "Автобусов"; ws["B9"] = summary["vehicles_count"]
+    ws["A10"] = "Водителей"; ws["B10"] = summary["drivers_count"]
+    ws["A11"] = "Ошибок"; ws["B11"] = summary["errors_count"]
+    ws["A12"] = "Предупреждений"; ws["B12"] = summary["warnings_count"]
+    ws["A14"] = "Ответственный пользователь"; ws["B14"] = summary.get("created_by") or ""
+    ws["A16"] = "Подпись ответственного пользователя"; ws["B16"] = "____________________ /____________________/"
+    ws.merge_cells("A1:D1")
+    ws.merge_cells("A2:D2")
+    ws["A2"].font = Font(size=16, bold=True, color="17365D")
+    ws.column_dimensions["A"].width = 34
+    ws.column_dimensions["B"].width = 34
+
+    sheet_defs = [
+        ("Сводка", ["Показатель", "Значение"], [
+            ["Количество маршрутов", summary["routes_count"]],
+            ["Количество рейсов", summary["trips_count"]],
+            ["Количество выходов", summary["runs_count"]],
+            ["Количество автобусов", summary["vehicles_count"]],
+            ["Количество водителей", summary["drivers_count"]],
+            ["Общий пробег", round(sum(float(x.get("distance_km") or 0) for x in lines), 1)],
+            ["Количество ошибок", summary["errors_count"]],
+            ["Количество предупреждений", summary["warnings_count"]],
+            ["Дата формирования", summary.get("created_at") or ""],
+            ["Период", period],
+        ]),
+        ("По маршрутам", ["Дата", "Маршрут", "Направление", "Рейс", "Выход", "Отправление", "Прибытие", "Время рейса", "Автобус", "Водитель", "Примечание"], [
+            [x["service_date"], f"№ {x['route_number']} {x['route_name']}", x["direction"], x["trip_number"], x["run_number"], x["departure_time"], x["arrival_time"], x["trip_duration"], x["garage_number"] or x["vehicle_number"], x["driver_name"], x["comment"]] for x in views["by_routes"]
+        ]),
+        ("По выходам", ["Дата", "Маршрут", "Выход", "Смена", "Автобус", "Водитель", "Начало", "Окончание", "Рейсов", "Пробег", "Время на линии"], [
+            [x["service_date"], f"№ {x['route_number']} {x['route_name']}", x["run_number"], x["shift_number"], x["garage_number"] or x["vehicle_number"], x["driver_name"], x["start_time"], x["end_time"], x["trips_count"], x["distance_km"], round((x["line_minutes"] or 0) / 60, 2)] for x in views["by_outputs"]
+        ]),
+        ("По водителям", ["Дата", "Водитель", "Табельный", "Маршрут", "Выход", "Автобус", "Начало", "Окончание", "Рабочее время"], [
+            [x["service_date"], x["driver_name"], x["driver_tab_number"], f"№ {x['route_number']}", x["run_number"], x["garage_number"] or x["vehicle_number"], x["start_time"], x["end_time"], round((x["line_minutes"] or 0) / 60, 2)] for x in views["by_drivers"]
+        ]),
+        ("По автобусам", ["Дата", "Автобус", "Госномер", "Маршрут", "Выход", "Водитель", "Выезд", "Заезд", "Рейсов", "Пробег"], [
+            [x["service_date"], x["garage_number"], x["vehicle_number"], f"№ {x['route_number']}", x["run_number"], x["driver_name"], x["start_time"], x["end_time"], x["trips_count"], x["distance_km"]] for x in views["by_buses"]
+        ]),
+        ("По времени", ["Дата", "Время", "Маршрут", "Направление", "Рейс", "Выход", "Автобус", "Водитель", "Событие"], [
+            [x.get("service_date"), x.get("time"), f"№ {x.get('route_number', '')}", x.get("direction", ""), x.get("trip_number", ""), x.get("run_number", ""), x.get("garage_number", "") or x.get("vehicle_number", ""), x.get("driver_name", ""), x.get("event", "")] for x in views["by_time"]
+        ]),
+        ("Ошибки", ["Уровень", "Маршрут", "Выход", "Рейс", "Объект", "Описание ошибки", "Рекомендация"], [
+            [e["level"], e["route_number"], e["run_number"], e["trip_number"], e["object_label"], e["message"], e["recommendation"]] for e in errors
+        ]),
+        ("Исходные данные", list(lines[0].keys()) if lines else ["Нет данных"], [[x.get(k) for k in lines[0].keys()] for x in lines] if lines else []),
+    ]
+    for title, headers, rows in sheet_defs:
+        sh = wb.create_sheet(title)
+        _summary_write_table(sh, headers, rows)
+    return _xlsx_download_response(wb, filename)
+
+
+def _month_label(month):
+    names = ["", "Январь", "Февраль", "Март", "Апрель", "Май", "Июнь", "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь"]
+    y, m = map(int, month.split("-"))
+    return f"{names[m]} {y}", y, m
+
+
+def roster_xlsx_response(month, settings, drivers, roster_rows, assignments, warnings, routes, norms, filename="roster.xlsx"):
+    import calendar
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "График месяца"
+    label, year, month_num = _month_label(month)
+    days = calendar.monthrange(year, month_num)[1]
+    ws["A1"] = settings.get("org_name", "")
+    ws["A2"] = "ГРАФИК РАБОТЫ ВОДИТЕЛЕЙ"
+    ws["A3"] = label
+    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=days + 4)
+    ws.merge_cells(start_row=2, start_column=1, end_row=2, end_column=days + 4)
+    ws["A2"].font = Font(size=15, bold=True, color="17365D")
+    header_row = 7
+    headers = ["Таб.№", "Водитель"] + [str(d) for d in range(1, days + 1)] + ["Итого"]
+    for col, value in enumerate(headers, 1):
+        c = ws.cell(header_row, col, value)
+        c.fill = SUMMARY_HEADER_FILL
+        c.font = SUMMARY_HEADER_FONT
+        c.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        c.border = SUMMARY_BORDER
+    by_driver_date = {}
+    for a in assignments:
+        by_driver_date.setdefault((a.get("driver_id"), a.get("date")), []).append(a)
+    roster_by_driver_date = {(r.get("driver_id"), r.get("date")): r for r in roster_rows}
+    row = header_row + 1
+    for driver in drivers:
+        ws.cell(row, 1, driver.get("tab_number") or "")
+        ws.cell(row, 2, driver.get("fio") or "")
+        total = 0.0
+        for d in range(1, days + 1):
+            iso = f"{year:04d}-{month_num:02d}-{d:02d}"
+            items = by_driver_date.get((driver.get("id"), iso), [])
+            text_parts = []
+            if items:
+                for a in items:
+                    total += float(a.get("hours") or 0)
+                    text_parts.append(
+                        f"№{a.get('route_number') or ''}\n{a.get('output_number') or ''}/{a.get('shift_number') or ''}\n"
+                        f"{a.get('start_time') or ''}-{a.get('end_time') or ''}\nПЗВ{int(norms.get('prep_final_minutes') or 0)}м\n{round(float(a.get('hours') or 0), 2)} ч"
+                    )
+            else:
+                r = roster_by_driver_date.get((driver.get("id"), iso))
+                if r and r.get("status") and r.get("status") != "работа":
+                    text_parts.append(r.get("status"))
+                elif r and r.get("status") == "работа":
+                    text_parts.append("работа")
+                    total += float(r.get("hours") or 0)
+            c = ws.cell(row, d + 2, "\n".join(text_parts))
+            c.alignment = Alignment(horizontal="center", vertical="top", wrap_text=True, shrink_to_fit=True)
+            c.border = SUMMARY_BORDER
+            if items:
+                c.fill = PatternFill("solid", fgColor="D9EAF7")
+        ws.cell(row, days + 3, round(total, 2))
+        for col in range(1, days + 4):
+            ws.cell(row, col).border = SUMMARY_BORDER
+            ws.cell(row, col).alignment = Alignment(vertical="top", wrap_text=True, shrink_to_fit=True)
+        ws.row_dimensions[row].height = 64
+        row += 1
+    ws.column_dimensions["A"].width = 10
+    ws.column_dimensions["B"].width = 28
+    for col in range(3, days + 3):
+        ws.column_dimensions[get_column_letter(col)].width = 10.5
+    ws.column_dimensions[get_column_letter(days + 3)].width = 10
+    ws.freeze_panes = "C8"
+
+    sh = wb.create_sheet("Назначения")
+    sh["A1"] = settings.get("org_name", "")
+    sh["A2"] = "Назначения водителей по графику"
+    assign_headers = ["Дата", "Таб.№", "Водитель", "Статус дня", "Маршрут", "Выход", "Смена", "Рейсы", "Начало", "Окончание", "ПЗВ, мин", "Обед/перерыв, мин", "Линейное время, ч", "Рабочее время с ПЗВ, ч", "Ночные часы", "Комментарий"]
+    for col, value in enumerate(assign_headers, 1):
+        c = sh.cell(4, col, value)
+        c.fill = SUMMARY_HEADER_FILL
+        c.font = SUMMARY_HEADER_FONT
+        c.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        c.border = SUMMARY_BORDER
+    prep = int(norms.get("prep_final_minutes") or 0)
+    for idx, a in enumerate(assignments, 5):
+        values = [
+            a.get("date"), a.get("tab_number"), a.get("fio"), "работа",
+            f"№{a.get('route_number') or ''}", a.get("output_number"), a.get("shift_number"),
+            f"{a.get('trip_from') or ''}-{a.get('trip_to') or ''}", a.get("start_time"), a.get("end_time"),
+            prep, int(a.get("break_min") or 0), f"=ROUND((J{idx}-I{idx})*24,2)",
+            f"=M{idx}+K{idx}/60", a.get("night_hours") or 0, a.get("comment") or "",
+        ]
+        for col, value in enumerate(values, 1):
+            c = sh.cell(idx, col, value)
+            c.border = SUMMARY_BORDER
+            c.alignment = Alignment(vertical="top", wrap_text=True)
+            if col == 11:
+                c.fill = PatternFill("solid", fgColor="FFF2CC")
+    sh.auto_filter.ref = f"A4:P{max(5, 4 + len(assignments))}"
+    sh.freeze_panes = "A5"
+    sh.protection.sheet = False
+    for col in range(1, 17):
+        sh.column_dimensions[get_column_letter(col)].width = 16
+
+    warn_ws = wb.create_sheet("Проверки 424")
+    warn_ws["A1"] = "Проверки 424"
+    warn_headers = ["Уровень", "Дата", "Водитель", "Тип", "Норма", "Факт", "Рекомендация"]
+    for col, value in enumerate(warn_headers, 1):
+        warn_ws.cell(3, col, value)
+    for idx, w in enumerate(warnings, 4):
+        vals = [w.get("severity"), w.get("date"), w.get("driver"), w.get("type"), w.get("norm_value"), w.get("fact_value"), w.get("recommendation")]
+        for col, value in enumerate(vals, 1):
+            warn_ws.cell(idx, col, value)
+    if not warnings:
+        warn_ws.cell(4, 1, "Нарушений не найдено")
+    for col in range(1, 8):
+        warn_ws.column_dimensions[get_column_letter(col)].width = 24
+
+    refs = wb.create_sheet("Справочники")
+    refs["A1"] = "ПЗВ по нормам, мин"
+    refs["B1"] = prep
+    refs["A2"] = "Месяц"
+    refs["B2"] = label
+    refs["A4"] = "Маршруты"
+    for idx, r in enumerate(routes, 5):
+        refs.cell(idx, 1, r.get("number"))
+        refs.cell(idx, 2, r.get("name"))
+    return _xlsx_download_response(wb, filename)

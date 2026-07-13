@@ -52,8 +52,10 @@ const NAV = [
   ["Оперативная работа", null],
   ["dashboard", "Главная панель"],
   ["order", "Наряд на день"],
+  ["summarySchedule", "Сводное расписание"],
   ["release", "Медосмотр и техконтроль"],
   ["waybills", "Путевые листы"],
+  ["repairs", "Ремонт и ТО"],
   ["Планирование", null],
   ["schedule", "Расписания маршрутов"],
   ["roster", "График водителей"],
@@ -168,6 +170,10 @@ function formModal(title, fields, values = {}, note = "") {
     <div class="foot"><button class="btn sec" data-act="cancel">Отмена</button>
     <button class="btn" data-act="ok">Сохранить</button></div>`);
 }
+async function textModal(title, label, value = "", note = "") {
+  const r = await formModal(title, [{ k: "value", label, type: "textarea" }], { value }, note);
+  return r ? r.value : null;
+}
 const tbl = (headers, rowsHtml) =>
   `<div class="tbl-wrap"><table class="grid"><thead><tr>${headers.map(h => `<th>${h}</th>`).join("")}</tr></thead><tbody>${rowsHtml}</tbody></table></div>`;
 const sevBadge = (s) => `<span class="badge ${s === "критично" ? "b-err" : s === "ошибка" ? "b-warn" : "b-mut"}">${s}</span>`;
@@ -187,6 +193,289 @@ function violList(violations) {
 
 /* ================= ГЛАВНАЯ ================= */
 const VIEWS = {};
+async function repairVehicleCard(busId) {
+  const d = await api(`/api/repairs/vehicles/${busId}/card`);
+  const history = (d.history || []).map(x => `<tr><td>${esc(x.order_number)}</td><td>${esc(x.closed_at || "")}</td><td>${esc(x.result || "")}</td><td>${esc(x.total_cost || 0)}</td><td>${esc(x.downtime_hours || 0)}</td></tr>`).join("");
+  await modal(`<h3>Карточка автобуса ${esc(d.vehicle.garage_number)}</h3><div class="cards"><div class="card"><div class="num">${d.totals.repairs}</div><div class="lbl">ремонтов</div></div><div class="card"><div class="num">${d.totals.cost}</div><div class="lbl">затраты</div></div><div class="card"><div class="num">${d.totals.downtime_hours}</div><div class="lbl">часов простоя</div></div></div>${tbl(["Заказ-наряд", "Закрыт", "Результат", "Стоимость", "Простой"], history || `<tr><td colspan="5" class="muted">История пока пуста</td></tr>`)}<div class="foot"><button class="btn sec" data-act="cancel">Закрыть</button></div>`);
+}
+async function repairMaintenancePlan() {
+  const refs = await api("/api/repairs/references");
+  const v = await formModal("Плановое ТО", [
+    { k: "vehicle_id", label: "Автобус", type: "select", options: REFS.buses.map(b => [b.id, `${b.garage_number} ${b.plate || ""}`]) },
+    { k: "repair_type_id", label: "Вид ТО", type: "select", options: refs.repair_types.map(x => [x.id, x.name]) },
+    { k: "name", label: "Название плана" },
+    { k: "next_date", label: "Следующая дата", type: "date" },
+    { k: "next_odometer", label: "Следующий пробег", type: "number", step: "1" },
+    { k: "warning_days", label: "Предупреждать за дней", type: "number", def: 7 },
+    { k: "warning_km", label: "Предупреждать за км", type: "number", def: 500 },
+  ]);
+  if (!v) return;
+  await api("/api/repairs/maintenance/plans", { method: "POST", body: v });
+  toast("План ТО создан"); route();
+}
+async function repairEvaluateMaintenance() {
+  const r = await api("/api/repairs/maintenance/evaluate", { method: "POST", body: { date: today() } });
+  toast(`Проверено планов: ${r.plans_checked}, создано заявок: ${r.requests_created}`); route();
+}
+async function repairEvaluateAlerts() {
+  const r = await api("/api/repairs/alerts/evaluate", { method: "POST", body: { date: today() } });
+  toast(`Создано уведомлений: ${r.notifications_created}; просрочек: ${r.overdue_created}; дефицитов: ${r.low_stock_created}`);
+  route();
+}async function repairReportExport() {
+  const end = today(), start = end.slice(0, 8) + "01";
+  const v = await formModal("Фильтры отчёта ремонта", [
+    { k: "date_from", label: "Период с", type: "date" },
+    { k: "date_to", label: "Период по", type: "date" },
+    { k: "vehicle_id", label: "Автобус", type: "select", empty: true, options: REFS.buses.map(b => [b.id, `${b.garage_number || ""} ${b.plate || ""}`]) },
+    { k: "status", label: "Статус заказ-наряда", type: "select", empty: true, options: ["черновик", "диагностика", "ожидает запчасти", "готов к работе", "в работе", "приостановлен", "контроль", "завершен", "отменен"] },
+  ], { date_from: start, date_to: end });
+  if (!v) return;
+  const query = new URLSearchParams();
+  Object.entries(v).forEach(([key, value]) => { if (value !== "") query.set(key, value); });
+  openWin(`/api/repairs/reports/export.xlsx?${query.toString()}`);
+}async function repairNewRequest() {
+  const v = await formModal("Новая заявка на ремонт", [
+    { k: "vehicle_id", label: "Автобус", type: "select", empty: true, options: REFS.buses.map(b => [b.id, `${b.garage_number || ""} ${b.plate || ""} ${b.brand || ""} ${b.model || ""}`]) },
+    { k: "odometer", label: "Пробег, км", type: "number", step: "1" },
+    { k: "criticality", label: "Критичность", type: "select", options: ["обычная", "высокая", "критическая"] },
+    { k: "request_source", label: "Источник", type: "select", options: ["диспетчер", "водитель", "механик", "плановое ТО"] },
+    { k: "location", label: "Место нахождения" },
+    { k: "fault_description", label: "Описание неисправности", type: "textarea" },
+  ], { criticality: "обычная", request_source: "диспетчер" });
+  if (!v) return;
+  await api("/api/repairs/requests", { method: "POST", body: v });
+  toast("Заявка на ремонт создана"); route();
+}
+async function repairCreateOrder(requestId, vehicleId) {
+  const refs = await api("/api/repairs/references");
+  const v = await formModal("Создать заказ-наряд", [
+    { k: "repair_type_id", label: "Вид ремонта", type: "select", options: refs.repair_types.map(x => [x.id, x.name]) },
+    { k: "repair_post_id", label: "Ремонтный пост", type: "select", empty: true, options: refs.repair_posts.map(x => [x.id, x.name]) },
+    { k: "diagnosis", label: "Предварительный диагноз", type: "textarea" },
+    { k: "planned_start", label: "Плановое начало", type: "datetime-local" },
+    { k: "planned_end", label: "Плановое окончание", type: "datetime-local" },
+  ]);
+  if (!v) return;
+  await api("/api/repairs/orders", { method: "POST", body: { ...v, request_id: requestId, vehicle_id: vehicleId } });
+  toast("Заказ-наряд создан"); route();
+}
+async function repairEditOrder(orderId) {
+  const [detail, refs] = await Promise.all([api(`/api/repairs/orders/${orderId}/work`), api("/api/repairs/references")]);
+  const order = detail.order;
+  const v = await formModal("Редактировать заказ-наряд", [
+    { k: "repair_type_id", label: "Вид ремонта", type: "select", options: refs.repair_types.map(x => [x.id, x.name]) },
+    { k: "repair_post_id", label: "Ремонтный пост", type: "select", empty: true, options: refs.repair_posts.map(x => [x.id, x.name]) },
+    { k: "diagnosis", label: "Диагноз", type: "textarea" },
+    { k: "planned_start", label: "Плановое начало", type: "datetime-local" },
+    { k: "planned_end", label: "Плановое окончание", type: "datetime-local" },
+    { k: "external_cost", label: "Внешние расходы", type: "number", step: "0.01" },
+    { k: "other_cost", label: "Прочие расходы", type: "number", step: "0.01" },
+  ], order);
+  if (!v) return;
+  await api(`/api/repairs/orders/${orderId}`, { method: "PATCH", body: v });
+  toast("Заказ-наряд обновлён"); route();
+}async function repairAssignWorker(orderId) {
+  const users = (await api("/api/repairs/workers/available")).items || [];
+  const v = await formModal("Назначить исполнителя", [
+    { k: "worker_id", label: "Сотрудник", type: "select", options: users.map(x => [x.id, `${x.full_name || x.username} — ${x.role}`]) },
+    { k: "role", label: "Роль в ремонте", type: "select", options: ["слесарь", "электрик", "диагност", "мастер"] },
+    { k: "planned_hours", label: "Плановые часы", type: "number", step: "0.1" },
+    { k: "hourly_rate", label: "Ставка за час", type: "number", step: "0.01" },
+  ], { role: "слесарь" });
+  if (!v) return;
+  await api(`/api/repairs/orders/${orderId}/workers`, { method: "POST", body: v });
+  toast("Исполнитель назначен"); route();
+}
+async function repairWorkerStart(id) { await api(`/api/repairs/workers/${id}/start`, { method: "POST" }); toast("Работа исполнителя начата"); route(); }
+async function repairWorkerFinish(id) {
+  const hours = await textModal("Завершить работу исполнителя", "Фактические часы");
+  if (hours === null) return;
+  await api(`/api/repairs/workers/${id}/finish`, { method: "POST", body: { actual_hours: hours } });
+  toast("Работа исполнителя завершена"); route();
+}
+async function repairWorkers(orderId) {
+  const d = await api(`/api/repairs/orders/${orderId}/work`);
+  const rows = (d.workers || []).map(w => `<tr><td>${esc(w.full_name || w.username)}</td><td>${esc(w.role)}</td><td>${esc(w.status)}</td><td>${esc(w.planned_hours)}</td><td>${esc(w.actual_hours)}</td><td>${esc(w.hourly_rate)}</td><td>${w.status === "назначен" ? `<button class="btn small" onclick="repairWorkerStart(${w.id})">Начать</button>` : w.status === "в работе" ? `<button class="btn small" onclick="repairWorkerFinish(${w.id})">Завершить</button>` : ""}</td></tr>`).join("");
+  await modal(`<h3>Исполнители заказ-наряда</h3>${tbl(["Сотрудник", "Роль", "Статус", "План, ч", "Факт, ч", "Ставка", "Действие"], rows || `<tr><td colspan="7" class="muted">Исполнители не назначены</td></tr>`)}<div class="muted">Трудовая стоимость: ${esc(d.order.labor_cost || 0)}</div><div class="foot"><button class="btn" onclick="repairAssignWorker(${orderId})">Назначить исполнителя</button><button class="btn sec" data-act="cancel">Закрыть</button></div>`);
+}
+async function repairUploadAttachment(orderId) {
+  const input = document.createElement("input"); input.type = "file"; input.accept = ".pdf,.jpg,.jpeg,.png,.docx,.xlsx";
+  input.onchange = async () => {
+    if (!input.files[0]) return;
+    const body = new FormData(); body.append("file", input.files[0]); body.append("category", "документ ремонта");
+    await api(`/api/repairs/orders/${orderId}/attachments`, { method: "POST", body });
+    toast("Вложение загружено"); route();
+  };
+  input.click();
+}
+async function repairAttachments(orderId) {
+  const items = (await api(`/api/repairs/orders/${orderId}/attachments`)).items || [];
+  const rows = items.map(x => `<tr><td>${esc(x.original_name)}</td><td>${esc(x.category || "")}</td><td>${Math.ceil((x.size_bytes || 0)/1024)} КБ</td><td>${esc(x.uploaded_at || "")}</td><td><a class="btn small sec" target="_blank" href="/api/repairs/attachments/${x.id}/download?token=${TOKEN}">Скачать</a></td></tr>`).join("");
+  await modal(`<h3>Вложения заказ-наряда</h3>${tbl(["Файл", "Категория", "Размер", "Загружен", "Действие"], rows || `<tr><td colspan="5" class="muted">Вложений пока нет</td></tr>`)}<div class="foot"><button class="btn" onclick="repairUploadAttachment(${orderId})">Загрузить файл</button><button class="btn sec" data-act="cancel">Закрыть</button></div>`);
+}
+async function repairPartAction(partLinkId, action, title) {
+  const quantity = await textModal(title, "Количество");
+  if (quantity === null) return;
+  await api(`/api/repairs/parts/${partLinkId}/${action}`, { method: "POST", body: { quantity } });
+  toast(title + ": выполнено"); route();
+}
+async function repairParts(orderId) {
+  const d = await api(`/api/repairs/orders/${orderId}/parts`);
+  const rows = (d.items || []).map(p => `<tr><td>${esc(p.code)} — ${esc(p.name)}</td><td>${esc(p.requested_qty)}</td><td>${esc(p.reserved_qty)}</td><td>${esc(p.issued_qty)}</td><td>${esc(p.installed_qty)}</td><td>${esc(p.returned_qty)}</td><td>${esc(p.stock_qty)}</td><td><button class="btn small sec" onclick="repairPartAction(${p.id},'reserve','Резервирование')">Резерв</button> <button class="btn small sec" onclick="repairPartAction(${p.id},'issue','Выдача')">Выдать</button> <button class="btn small sec" onclick="repairPartAction(${p.id},'install','Установка')">Установить</button> <button class="btn small sec" onclick="repairPartAction(${p.id},'return','Возврат')">Вернуть</button></td></tr>`).join("");
+  await modal(`<h3>Запчасти заказ-наряда</h3>${tbl(["Запчасть", "Запрошено", "Резерв", "Выдано", "Установлено", "Возврат", "Склад", "Действия"], rows || `<tr><td colspan="8" class="muted">Запчасти не запрошены</td></tr>`)}<div class="muted">Стоимость запчастей: ${esc(d.order.parts_cost || 0)}</div><div class="foot"><button class="btn" onclick="repairAddPart(${orderId})">Запросить запчасть</button><button class="btn sec" data-act="cancel">Закрыть</button></div>`);
+}
+async function repairAddPart(orderId) {
+  const parts = (await api("/api/repairs/stock/parts")).items || [];
+  if (!parts.length) { toast("В справочнике склада нет запчастей", true); return; }
+  const v = await formModal("Запчасти заказ-наряда", [
+    { k: "part_id", label: "Запчасть", type: "select", options: parts.map(p => [p.id, `${p.code} — ${p.name} (остаток ${p.stock_qty} ${p.unit})`]) },
+    { k: "quantity", label: "Количество", type: "number", step: "0.01" },
+  ]);
+  if (!v) return;
+  await api(`/api/repairs/orders/${orderId}/parts`, { method: "POST", body: v });
+  toast("Запчасть запрошена со склада"); route();
+}
+async function repairOperationStart(id) {
+  await api(`/api/repairs/operations/${id}/start`, { method: "POST" });
+  toast("Операция начата"); route();
+}
+async function repairOperationComplete(id) {
+  const v = await formModal("Завершить операцию", [
+    { k: "actual_hours", label: "Фактические часы", type: "number", step: "0.1" },
+    { k: "result", label: "Результат работы", type: "textarea" },
+  ]);
+  if (!v) return;
+  await api(`/api/repairs/operations/${id}/complete`, { method: "POST", body: v });
+  toast("Операция завершена"); route();
+}
+async function repairOperations(orderId) {
+  const d = await api(`/api/repairs/orders/${orderId}/work`);
+  const rows = (d.operations || []).map(o => `<tr><td>${esc(o.sequence_no)}</td><td>${esc(o.name)}</td><td>${esc(o.status)}</td><td>${esc(o.norm_hours)}</td><td>${esc(o.actual_hours)}</td><td>${esc(o.result || "")}</td><td>${o.status === "запланирована" ? `<button class="btn small" onclick="repairOperationStart(${o.id})">Начать</button>` : o.status === "в работе" ? `<button class="btn small" onclick="repairOperationComplete(${o.id})">Завершить</button>` : ""}</td></tr>`).join("");
+  await modal(`<h3>Операции заказ-наряда</h3>${tbl(["№", "Операция", "Статус", "Норматив", "Факт", "Результат", "Действие"], rows || `<tr><td colspan="7" class="muted">Операции не добавлены</td></tr>`)}<div class="muted">Плановые часы: ${esc(d.order.planned_hours || 0)} · Фактические часы: ${esc(d.order.actual_hours || 0)}</div><div class="foot"><button class="btn" onclick="repairAddOperation(${orderId})">Добавить операцию</button><button class="btn sec" data-act="cancel">Закрыть</button></div>`);
+}
+async function repairAddOperation(orderId) {
+  const v = await formModal("Добавить операцию", [
+    { k: "name", label: "Наименование операции" },
+    { k: "norm_hours", label: "Норматив, часов", type: "number", step: "0.1" },
+    { k: "price", label: "Стоимость работы", type: "number", step: "0.01" },
+  ]);
+  if (!v) return;
+  await api(`/api/repairs/orders/${orderId}/operations`, { method: "POST", body: v });
+  toast("Операция добавлена в заказ-наряд"); route();
+}
+async function repairInspect(orderId) {
+  const v = await formModal("Контрольный осмотр", [
+    { k: "result", label: "Результат осмотра" },
+    { k: "release_allowed", label: "Выпуск разрешён", type: "checkbox" },
+    { k: "defects", label: "Выявленные дефекты", type: "textarea" },
+    { k: "comment", label: "Комментарий", type: "textarea" },
+  ]);
+  if (!v) return;
+  await api(`/api/repairs/orders/${orderId}/inspection`, { method: "POST", body: v });
+  toast(v.release_allowed ? "Контроль пройден" : "Возвращено на доработку"); route();
+}
+async function repairCloseOrder(orderId) {
+  const result = await textModal("Закрыть ремонт", "Итоговый результат");
+  if (!result) return;
+  await api(`/api/repairs/orders/${orderId}/close`, { method: "POST", body: { result } });
+  toast("Ремонт закрыт, автобус допущен"); route();
+}
+async function repairAdvanceOrder(id, current) {
+  const next = { "черновик": "диагностика", "диагностика": "готов к работе", "готов к работе": "в работе", "в работе": "контроль" }[current];
+  if (next) await repairOrderStatus(id, next);
+}
+async function repairOrderStatus(id, status) {
+  await api(`/api/repairs/orders/${id}/status`, { method: "POST", body: { status } });
+  toast("Статус заказ-наряда изменён"); route();
+}
+async function repairCancelRequest(id) {
+  const reason = await textModal("Отмена заявки", "Причина отмены");
+  if (!reason) return;
+  await api(`/api/repairs/requests/${id}/cancel`, { method: "POST", body: { reason } });
+  toast("Заявка отменена"); route();
+}
+VIEWS.repairs = async function () {
+  const [requestData, orderData, maintenanceData, dashboardData, metricsData, calendarData] = await Promise.all([api("/api/repairs/requests"), api("/api/repairs/orders?active_only=true"), api("/api/repairs/maintenance/plans"), api("/api/repairs/dashboard"), api("/api/repairs/metrics/downtime"), api("/api/repairs/calendar")]);
+  const items = requestData.items || [], orders = orderData.items || [], maintenance = maintenanceData.items || [], repairKpi = dashboardData, repairMetrics = metricsData;
+  const calendarEvents = calendarData.items || [], calendarRows = calendarEvents.map(e => `<tr><td>${stBadge(e.event_type)}</td><td>${esc(e.start || "")}${e.end && e.end !== e.start ? `<br><span class="muted">до ${esc(e.end)}</span>` : ""}</td><td>${esc(e.garage_number || "")} ${esc(e.plate || "")}</td><td>${esc(e.order_number || e.title || "")}</td><td>${stBadge(e.status || "")}</td></tr>`).join("");
+  const active = items.filter(x => !["отменена", "закрыта"].includes(x.status));
+  const rows = items.map(r => `<tr><td><b>${esc(r.request_number)}</b><br><span class="muted">${esc(r.created_at || "")}</span></td><td>${esc(r.garage_number || "")}<br><span class="muted">${esc(r.plate || "")} ${esc(r.brand || "")} ${esc(r.model || "")}</span></td><td>${r.repeated ? `<span class="badge b-err">Повторная неисправность</span><br>` : ""}${esc(r.fault_description)}</td><td>${esc(r.odometer)}</td><td>${stBadge(r.criticality)}</td><td>${stBadge(r.status)}</td><td>${r.status === "новая" ? `<button class="btn small" onclick="repairCreateOrder(${r.id},${r.vehicle_id})">Создать заказ-наряд</button> <button class="btn small sec" onclick="repairCancelRequest(${r.id})">Отменить</button>` : ""}</td></tr>`).join("");
+  $("content").innerHTML = `<div class="toolbar"><button class="btn" onclick="repairNewRequest()">Создать заявку</button><button class="btn sec" onclick="repairMaintenancePlan()">Плановое ТО</button><button class="btn sec" onclick="repairEvaluateMaintenance()">Проверить сроки ТО</button><button class="btn sec" onclick="repairEvaluateAlerts()">Проверить уведомления</button><button class="btn sec" onclick="repairReportExport()">Отчёт ремонта Excel</button><button class="btn sec" onclick="route()">Обновить</button></div><div class="cards"><div class="card"><div class="num">${items.length}</div><div class="lbl">всего заявок</div></div><div class="card ${active.length ? "warn" : "ok"}"><div class="num">${active.length}</div><div class="lbl">Активные ремонты</div></div></div><div class="panel"><h3>Заявки на ремонт и ТО</h3>${tbl(["Заявка", "Автобус", "Неисправность", "Пробег", "Критичность", "Статус", "Действия"], rows || `<tr><td colspan="7" class="muted">Заявок пока нет</td></tr>`)}</div>`;
+  $("content").innerHTML += `<div class="cards"><div class="card"><div class="num">${repairKpi.active_orders}</div><div class="lbl">активных заказов</div></div><div class="card ${repairKpi.overdue_orders ? "err" : "ok"}"><div class="num">${repairKpi.overdue_orders}</div><div class="lbl">просрочено</div></div><div class="card"><div class="num">${repairKpi.closed_orders}</div><div class="lbl">закрыто ремонтов</div></div><div class="card"><div class="num">${repairKpi.closed_cost}</div><div class="lbl">затраты по закрытым</div></div></div><div class="panel"><h3>Канбан ремонта</h3><div class="toolbar">${Object.entries(repairKpi.kanban).map(([status, rows]) => `<span class="badge b-mut">${esc(status)}: ${rows.length}</span>`).join("")}</div></div>`;
+  $("content").innerHTML += `<div class="cards"><div class="card ${repairMetrics.readiness_coefficient < 0.9 ? "warn" : "ok"}"><div class="num">${(repairMetrics.readiness_coefficient * 100).toFixed(1)}%</div><div class="lbl">Коэффициент технической готовности</div></div><div class="card"><div class="num">${repairMetrics.available_buses} / ${repairMetrics.fleet_total}</div><div class="lbl">доступно автобусов</div></div><div class="card"><div class="num">${repairMetrics.total_stage_hours}</div><div class="lbl">часов простоя по этапам</div></div></div><div class="panel"><h3>Простой по этапам</h3><div class="toolbar">${Object.entries(repairMetrics.stage_hours).map(([status, hours]) => `<span class="badge b-mut">${esc(status)}: ${hours} ч</span>`).join("") || `<span class="muted">Данных о простое пока нет</span>`}</div></div>`;
+  $("content").innerHTML += `<div class="panel"><h3>Календарь ремонтов и ТО</h3>${tbl(["Событие", "Дата", "Автобус", "Документ / работа", "Статус"], calendarRows || `<tr><td colspan="5" class="muted">На ближайшие 30 дней событий нет</td></tr>`)}</div>`;
+  $("content").innerHTML += `<div class="panel"><h3>Заказ-наряды</h3>${tbl(["Номер", "Заявка", "Автобус", "Вид ремонта", "Мастер", "Стоимость", "Статус", "Действия"], orders.map(o => `<tr><td><b>${esc(o.order_number)}</b></td><td>${esc(o.request_number || "")}</td><td>${esc(o.garage_number)} ${esc(o.plate || "")}</td><td>${esc(o.repair_type_name || "")}</td><td>${esc(o.responsible_master_name || "")}</td><td>${esc(o.total_cost || 0)}</td><td>${stBadge(o.status)}</td><td><button class="btn small sec" onclick="repairEditOrder(${o.id})">Редактировать</button> <button class="btn small sec" onclick="repairOperations(${o.id})">Операции</button> <button class="btn small sec" onclick="repairParts(${o.id})">Запчасти</button> <button class="btn small sec" onclick="repairVehicleCard(${o.bus_id})">Карточка автобуса</button> <button class="btn small sec" onclick="repairAttachments(${o.id})">Вложения</button> <button class="btn small sec" onclick="repairWorkers(${o.id})">Исполнители</button> <button class="btn small sec" onclick="openWin('/api/repairs/orders/${o.id}/print')">Печать</button> ${["черновик","диагностика","готов к работе","в работе"].includes(o.status) ? `<button class="btn small" onclick="repairAdvanceOrder(${o.id},'${o.status}')">${o.status === "в работе" ? "На контроль" : "Следующий этап"}</button>` : ""} ${o.status === "контроль" ? `<button class="btn small" onclick="repairInspect(${o.id})">Контрольный осмотр</button>` : ""} ${o.release_allowed ? `<button class="btn small" onclick="repairCloseOrder(${o.id})">Закрыть ремонт</button>` : ""}</td></tr>`).join("") || `<tr><td colspan="8" class="muted">Заказ-нарядов пока нет</td></tr>`)}</div>`;
+};
+const SUMMARY_TABS = [
+  ["by_routes", "По маршрутам"], ["by_outputs", "По выходам"], ["by_drivers", "По водителям"],
+  ["by_buses", "По автобусам"], ["by_time", "По времени"], ["errors", "Проверка ошибок"],
+  ["export", "Экспорт в Excel"], ["history", "История формирования"],
+];
+function summaryState() {
+  const d = today();
+  window._summary = window._summary || { date_from: d, date_to: d, route_id: "", q: "", only_errors: false,
+    only_no_driver: false, only_no_bus: false, include_inactive: false, tab: "by_routes", selected_id: 0, data: null, history: [] };
+  return window._summary;
+}
+function summaryLevelClass(level) {
+  if (level === "Критическая ошибка") return "sum-critical";
+  if (level === "Ошибка") return "sum-error";
+  if (level === "Предупреждение") return "sum-warning";
+  if (level === "Информация") return "sum-info";
+  return "";
+}
+function summaryFilteredRows(rows) {
+  const st = summaryState(), q = (st.q || "").toLowerCase();
+  return (rows || []).filter(r => {
+    if (st.route_id && String(r.route_id || "") !== String(st.route_id)) return false;
+    if (st.only_errors && !r.error_flag) return false;
+    if (st.only_no_driver && (r.driver_name || r.driver_id)) return false;
+    if (st.only_no_bus && (r.garage_number || r.vehicle_number || r.vehicle_id)) return false;
+    return !q || JSON.stringify(r).toLowerCase().includes(q);
+  });
+}
+function summaryTable(headers, rows, mapper) {
+  return `<div class="table-scroll"><table class="summary-table"><thead><tr>${headers.map(h => `<th>${esc(h)}</th>`).join("")}</tr></thead><tbody>${rows.map(r => `<tr class="${r.error_flag ? "sum-row-error" : ""}">${mapper(r).map(v => `<td>${v == null ? "" : esc(v)}</td>`).join("")}</tr>`).join("") || `<tr><td colspan="${headers.length}" class="muted">Нет данных</td></tr>`}</tbody></table></div>`;
+}
+async function summaryGenerate() {
+  const st = summaryState();
+  const body = { date_from: st.date_from, date_to: st.date_to, route_ids: st.route_id ? [+st.route_id] : [], include_inactive: st.include_inactive };
+  st.data = await api("/api/summary-schedules/generate", { method: "POST", body });
+  st.selected_id = st.data.summary.id;
+  toast("Сводное расписание сформировано"); route();
+}
+async function summaryRecheck() {
+  const st = summaryState(); if (!st.selected_id) return;
+  st.data = await api(`/api/summary-schedules/${st.selected_id}/check`, { method: "POST" });
+  toast("Проверка ошибок выполнена"); route();
+}
+function summaryExport() {
+  const st = summaryState(); if (st.selected_id) openWin(`/api/summary-schedules/${st.selected_id}/export.xlsx`);
+}
+async function summaryOrder() {
+  const st = summaryState(); if (!st.selected_id) return;
+  await api(`/api/summary-schedules/${st.selected_id}/order`, { method: "POST", body: { regenerate: true, force: true } });
+  toast("Наряд сформирован из сводного расписания"); location.hash = "#/order";
+}
+VIEWS.summarySchedule = async function () {
+  const st = summaryState();
+  st.history = (await api(`/api/summary-schedules?date_from=${st.date_from}&date_to=${st.date_to}`)).items || [];
+  if (!st.data && st.history[0]) { st.selected_id = st.history[0].id; st.data = await api(`/api/summary-schedules/${st.selected_id}`); }
+  const data = st.data || { summary: null, lines: [], errors: [], views: {} }, summary = data.summary || {};
+  const tabs = SUMMARY_TABS.map(([k, label]) => `<button class="${st.tab === k ? "on" : ""}" onclick="_summary.tab='${k}'; route()">${label}</button>`).join("");
+  const kpi = summary.id ? `<div class="summary-kpis"><div><b>${summary.routes_count || 0}</b><span>маршрутов</span></div><div><b>${summary.trips_count || 0}</b><span>рейсов</span></div><div><b>${summary.runs_count || 0}</b><span>выходов</span></div><div><b>${summary.drivers_count || 0}</b><span>водителей</span></div><div><b>${summary.vehicles_count || 0}</b><span>автобусов</span></div><div class="${summary.errors_count ? "sum-critical" : "sum-ok"}"><b>${summary.errors_count || 0}</b><span>ошибок</span></div></div>` : `<div class="panel muted">Сводное расписание еще не сформировано.</div>`;
+  let body = "";
+  if (st.tab === "by_routes") body = summaryTable(["Дата", "Маршрут", "Направление", "Рейс", "Выход", "Отправление", "Прибытие", "Автобус", "Водитель", "Примечание"], summaryFilteredRows(data.views.by_routes), r => [r.service_date, `№ ${r.route_number} ${r.route_name || ""}`, r.direction, r.trip_number, r.run_number, r.departure_time, r.arrival_time, r.garage_number || r.vehicle_number, r.driver_name, r.comment]);
+  if (st.tab === "by_outputs") body = summaryTable(["Дата", "Маршрут", "Выход", "Смена", "Автобус", "Водитель", "Начало", "Окончание", "Рейсов", "Пробег"], summaryFilteredRows(data.views.by_outputs), r => [r.service_date, `№ ${r.route_number} ${r.route_name || ""}`, r.run_number, r.shift_number, r.garage_number || r.vehicle_number, r.driver_name, r.start_time, r.end_time, r.trips_count, r.distance_km]);
+  if (st.tab === "by_drivers") body = summaryTable(["Дата", "Водитель", "Табельный", "Маршрут", "Выход", "Автобус", "Начало", "Окончание"], summaryFilteredRows(data.views.by_drivers), r => [r.service_date, r.driver_name, r.driver_tab_number, `№ ${r.route_number}`, r.run_number, r.garage_number || r.vehicle_number, r.start_time, r.end_time]);
+  if (st.tab === "by_buses") body = summaryTable(["Дата", "Автобус", "Госномер", "Маршрут", "Выход", "Водитель", "Выезд", "Заезд", "Рейсов", "Пробег"], summaryFilteredRows(data.views.by_buses), r => [r.service_date, r.garage_number, r.vehicle_number, `№ ${r.route_number}`, r.run_number, r.driver_name, r.start_time, r.end_time, r.trips_count, r.distance_km]);
+  if (st.tab === "by_time") body = summaryTable(["Дата", "Время", "Маршрут", "Рейс", "Выход", "Автобус", "Водитель", "Событие"], data.views.by_time || [], r => [r.service_date, r.time, `№ ${r.route_number || ""}`, r.trip_number || "", r.run_number || "", r.garage_number || r.vehicle_number || "", r.driver_name || "", r.event]);
+  if (st.tab === "errors") body = `<div class="table-scroll"><table class="summary-table"><thead><tr><th>Уровень</th><th>Маршрут</th><th>Выход</th><th>Рейс</th><th>Объект</th><th>Описание ошибки</th><th>Рекомендация</th></tr></thead><tbody>${(data.errors || []).map(e => `<tr class="${summaryLevelClass(e.level)}"><td>${esc(e.level)}</td><td>${esc(e.route_number || "")}</td><td>${esc(e.run_number || "")}</td><td>${esc(e.trip_number || "")}</td><td>${esc(e.object_label || "")}</td><td>${esc(e.message)}</td><td>${esc(e.recommendation || "")}</td></tr>`).join("") || `<tr><td colspan="7" class="muted">Ошибок нет</td></tr>`}</tbody></table></div>`;
+  if (st.tab === "export") body = `<div class="panel"><h3>Экспорт в Excel</h3><p class="muted">Файл содержит титульный лист, сводку и таблицы по маршрутам, выходам, водителям, автобусам, времени, ошибкам и исходным данным.</p><button class="btn" onclick="summaryExport()" ${summary.id ? "" : "disabled"}>Выгрузить в Excel</button></div>`;
+  if (st.tab === "history") body = summaryTable(["ID", "Создано", "Период", "Пользователь", "Маршрутов", "Рейсов", "Ошибок", "Статус", "Комментарий"], st.history, r => [r.id, r.created_at, `${r.period_start} — ${r.period_end}`, r.created_by, r.routes_count, r.trips_count, r.errors_count, r.status, r.comment]);
+  $("content").innerHTML = `<h2>Сводное расписание</h2><div class="toolbar summary-toolbar">с <input type="date" value="${st.date_from}" onchange="_summary.date_from=this.value; _summary.data=null; route()"> по <input type="date" value="${st.date_to}" onchange="_summary.date_to=this.value; _summary.data=null; route()"><select onchange="_summary.route_id=this.value; route()"><option value="">Все маршруты</option>${REFS.routes.map(r => `<option value="${r.id}" ${String(r.id) === String(st.route_id) ? "selected" : ""}>№ ${esc(r.number)} ${esc(r.name || "")}</option>`).join("")}</select><input placeholder="поиск" value="${esc(st.q)}" onchange="_summary.q=this.value; route()"><label><input type="checkbox" ${st.only_errors ? "checked" : ""} onchange="_summary.only_errors=this.checked; route()"> только ошибки</label><label><input type="checkbox" ${st.only_no_driver ? "checked" : ""} onchange="_summary.only_no_driver=this.checked; route()"> без водителя</label><label><input type="checkbox" ${st.only_no_bus ? "checked" : ""} onchange="_summary.only_no_bus=this.checked; route()"> без автобуса</label></div><div class="toolbar"><button class="btn" onclick="summaryGenerate()">Сформировать сводное расписание</button><button class="btn sec" onclick="summaryRecheck()" ${summary.id ? "" : "disabled"}>Проверить ошибки</button><button class="btn" onclick="summaryOrder()" ${summary.id ? "" : "disabled"}>Сформировать наряд</button><button class="btn sec" onclick="summaryExport()" ${summary.id ? "" : "disabled"}>Выгрузить в Excel</button><button class="btn sec" onclick="_summary.data=null; route()">Обновить</button><button class="btn ghost" onclick="window._summary=null; route()">Очистить фильтры</button><button class="btn sec" onclick="toast('Версия уже сохранена после формирования')" ${summary.id ? "" : "disabled"}>Сохранить версию</button></div>${kpi}<div class="tabs">${tabs}</div>${body}`;
+};
+
 VIEWS.dashboard = async function () {
   const d = await api("/api/dashboard");
   const notif = await api("/api/notifications");
@@ -215,7 +504,8 @@ VIEWS.dashboard = async function () {
       <div class="panel"><h3>Уведомления <button class="btn small sec" onclick="api('/api/notifications/seen',{method:'POST'}).then(route)">отметить прочитанными</button></h3>
         ${notif.items.slice(0, 12).map(n => `<div class="vio ${n.level === "error" ? "" : "w"}">
           <b>${esc(n.category || "")} <span class="muted">${esc((n.ts || "").replace("T", " "))}</span></b>${esc(n.message)}</div>`).join("") || '<span class="muted">нет уведомлений</span>'}</div>
-    </div>`;
+    </div>`;  $("content").innerHTML += `<div class="panel"><h3>Планы технического обслуживания</h3>${tbl(["Автобус", "План", "Вид", "Следующая дата", "Следующий пробег", "Текущий пробег"], maintenance.map(p => `<tr><td>${esc(p.garage_number)} ${esc(p.plate || "")}</td><td>${esc(p.name)}</td><td>${esc(p.repair_type_name)}</td><td>${esc(p.next_date || "")}</td><td>${esc(p.next_odometer || "")}</td><td>${esc(p.odometer || 0)}</td></tr>`).join("") || `<tr><td colspan="6" class="muted">Планы ТО не созданы</td></tr>`)}</div>`;
+
 };
 
 /* ================= НАРЯД ================= */
@@ -273,7 +563,7 @@ async function orderApprove(oid) {
     await api(`/api/orders/${oid}/status`, { method: "POST", body: { status: "утвержден" } });
     toast("Наряд утверждён"); route();
   } catch (e) {
-    const c = prompt("Утверждение заблокировано:\n" + e.message + "\n\nВвести обоснование допустимого исключения (или отмена):");
+    const c = await textModal("Обоснование утверждения", "Обоснование", "", "Утверждение заблокировано:\n" + e.message);
     if (c) {
       await api(`/api/orders/${oid}/status`, { method: "POST", body: { status: "утвержден", force_comment: c } })
         .then(() => { toast("Утверждено с обоснованием"); route(); }).catch(er => toast(er.message, true));
@@ -281,7 +571,7 @@ async function orderApprove(oid) {
   }
 }
 async function lineCancel(lid) {
-  const reason = prompt("Причина снятия выхода (нехватка водителей, автобусов и т.п.):");
+  const reason = await textModal("Снять выход", "Причина", "", "Например: нехватка водителей или автобусов");
   if (!reason) return;
   await api(`/api/orders/line/${lid}`, { method: "PUT", body: { status: "отменен", dispatcher_note: "снят: " + reason } })
     .catch(e => toast(e.message, true));
@@ -293,7 +583,7 @@ async function lineRestore(lid) {
   toast("Выход восстановлен"); route();
 }
 async function lineNote(lid, cur) {
-  const v = prompt("Отметка диспетчера:", cur || "");
+  const v = await textModal("Отметка диспетчера", "Отметка", cur || "");
   if (v === null) return;
   await api(`/api/orders/line/${lid}`, { method: "PUT", body: { dispatcher_note: v } });
   route();
@@ -406,7 +696,7 @@ async function wbClose(wid, odoStart, fuelStart) {
   } catch (e) { toast(e.message, true); }
 }
 async function wbCancel(wid) {
-  const reason = prompt("Причина аннулирования путевого листа:");
+  const reason = await textModal("Аннулировать путевой лист", "Причина аннулирования");
   if (!reason) return;
   await api(`/api/waybills/${wid}/cancel`, { method: "POST", body: { reason } }).catch(e => toast(e.message, true));
   toast("Путевой лист аннулирован"); route();
@@ -451,6 +741,7 @@ VIEWS.roster = async function () {
       <input type="month" value="${month}" onchange="_rosterMonth=this.value; route()">
       <button class="btn" onclick="rosterGen('${from}','${to}')">Сформировать график</button>
       <button class="btn sec" onclick="rosterCheck('${from}','${to}')">Проверить (Приказ 424)</button>
+      <button class="btn sec" onclick="openWin('/api/roster/export.xlsx?month=${month}')">График в Excel</button>
       <button class="btn" onclick="rosterApprove('${from}','${to}')">Утвердить график</button>
       <button class="btn sec" onclick="openWin('/api/timesheet/export.xlsx?month=${month}')">Экспорт в Excel</button>
       <span class="muted">клик по ячейке — редактирование дня</span>
@@ -485,7 +776,7 @@ async function rosterApprove(from, to) {
     const r = await api("/api/roster/approve", { method: "POST", body: { date_from: from, date_to: to } });
     toast(`График утверждён. Нарушений: ${r.violations}, критичных: ${r.critical}`);
   } catch (e) {
-    const c = prompt(e.message + "\n\nОбоснование допустимого исключения:");
+    const c = await textModal("Обоснование утверждения графика", "Обоснование", "", e.message);
     if (c) await api("/api/roster/approve", { method: "POST", body: { date_from: from, date_to: to, force_comment: c } })
       .then(r => toast("Утверждено с обоснованием")).catch(er => toast(er.message, true));
   }
@@ -1343,7 +1634,10 @@ VIEWS.settings = async function () {
       <option value="advisory">Свободное оформление с предупреждениями</option>
     </select></label>
     <div class="muted">Режим применяется к одиночному и массовому оформлению ПЛ в наряде.</div></div>` : "";
-  const orgFields = [["org_name", "Наименование перевозчика"], ["org_address", "Адрес"], ["org_phone", "Телефон"],
+  const repeatHtml = USER.role === "админ" ? `<div class="panel"><h3>Настройки ремонта и ТО</h3>
+    <label class="f">Период повторной неисправности, дней<input data-set="repair_repeat_days" type="number" min="1" max="365" value="${esc(st.repair_repeat_days || 30)}"></label>
+    <div class="muted">Заявка с таким же описанием по тому же автобусу в пределах периода помечается как повторная.</div>
+    <button class="btn" onclick="saveSettings()">Сохранить настройки ремонта</button></div>` : "";  const orgFields = [["org_name", "Наименование перевозчика"], ["org_address", "Адрес"], ["org_phone", "Телефон"],
     ["org_ogrn", "ОГРН"], ["org_inn", "ИНН"], ["org_okpo", "ОКПО"],
     ["org_owner", "Собственник / владелец (если отличается)"],
     ["org_control_place", "Место проведения техконтроля"],
@@ -1356,6 +1650,7 @@ VIEWS.settings = async function () {
       ${orgFields.map(([k, l]) => `<label class="f">${l}<input data-set="${k}" value="${esc(st[k] || "")}"></label>`).join("")}</div>
       <button class="btn" onclick="saveSettings()">Сохранить реквизиты</button></div>
     ${modeHtml}
+    ${repeatHtml}
     <div class="panel"><h3>Коды видов времени (соответствие 1С)</h3>
       ${tbl(["Код", "Наименование", "Код в 1С", ""], codes.items.map(c => `<tr><td><b>${esc(c.code)}</b></td>
         <td>${esc(c.name)}</td><td><input style="width:80px" id="tc-${esc(c.code)}" value="${esc(c.code_1c || "")}"></td>
@@ -1412,6 +1707,3 @@ document.addEventListener("keydown", (e) => {
   if (e.key === "Enter" && $("login-screen").style.display !== "none" && document.activeElement.id.startsWith("lg-")) doLogin();
 });
 if (TOKEN) boot(); else showLogin();
-
-
-

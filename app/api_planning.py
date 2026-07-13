@@ -4,7 +4,8 @@ import datetime, json
 from fastapi import APIRouter, Depends, HTTPException, Body
 from . import db, norms as N
 from .auth import current_user, require_write
-from .xl import xlsx_response, order_xlsx_response
+from .xl import xlsx_response, order_xlsx_response, roster_xlsx_response
+from .repair_service import vehicle_release_block_reason
 
 router = APIRouter(prefix="/api")
 
@@ -838,6 +839,48 @@ def roster_entry(payload: dict = Body(...), user=Depends(current_user)):
     finally:
         con.close()
 
+
+@router.get("/roster/export.xlsx")
+def roster_export(month: str, division: str = "", user=Depends(current_user)):
+    con = db.connect()
+    try:
+        year, month_num = map(int, month.split("-"))
+        start = datetime.date(year, month_num, 1)
+        if month_num == 12:
+            end = datetime.date(year + 1, 1, 1) - datetime.timedelta(days=1)
+        else:
+            end = datetime.date(year, month_num + 1, 1) - datetime.timedelta(days=1)
+        date_from, date_to = start.isoformat(), end.isoformat()
+        settings = db.get_settings(con)
+        active_norms = db.get_active_norms(con, date_from)
+        drivers_sql = "SELECT * FROM drivers WHERE status='работает'"
+        args = []
+        if division:
+            drivers_sql += " AND division=?"
+            args.append(division)
+        drivers = db.rows(con.execute(drivers_sql + " ORDER BY fio", args))
+        roster_rows = db.rows(con.execute(
+            "SELECT r.*, d.fio, d.tab_number, rt.number AS route_number "
+            "FROM roster r JOIN drivers d ON d.id=r.driver_id LEFT JOIN routes rt ON rt.id=r.route_id "
+            "WHERE r.date>=? AND r.date<=? ORDER BY d.fio, r.date",
+            (date_from, date_to),
+        ))
+        assignments = db.rows(con.execute(
+            "SELECT ra.*, d.fio, d.tab_number, rt.number AS route_number, rt.name AS route_name "
+            "FROM roster_assignments ra JOIN drivers d ON d.id=ra.driver_id "
+            "LEFT JOIN routes rt ON rt.id=ra.route_id "
+            "WHERE ra.date>=? AND ra.date<=? ORDER BY d.fio, ra.date, ra.start_time, ra.id",
+            (date_from, date_to),
+        ))
+        warnings = N.check_period(con, date_from, date_to)
+        routes = db.rows(con.execute("SELECT * FROM routes ORDER BY number"))
+        return roster_xlsx_response(
+            month, settings, drivers, roster_rows, assignments, warnings, routes, active_norms,
+            filename=f"roster_{month}.xlsx",
+        )
+    finally:
+        con.close()
+
 @router.get("/roster/check")
 def roster_check(date_from: str, date_to: str, driver_id: int = 0, user=Depends(current_user)):
     con = db.connect()
@@ -1033,6 +1076,9 @@ def order_line_update(lid: int, payload: dict = Body(...), user=Depends(current_
     try:
         old = db.one(con.execute("SELECT * FROM order_lines WHERE id=?", (lid,)))
         if not old: raise HTTPException(404, "Строка наряда не найдена")
+        if "bus_id" in payload and payload["bus_id"]:
+            reason = vehicle_release_block_reason(con, payload["bus_id"])
+            if reason: raise HTTPException(409, reason)
         f = [x for x in ["driver_id","bus_id","report_time","depart_depot","start_line","end_line",
                          "return_depot","dispatcher_note","status"] if x in payload]
         con.execute("UPDATE order_lines SET " + ",".join(x + "=?" for x in f) + " WHERE id=?",
