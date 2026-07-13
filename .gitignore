@@ -29,3 +29,6 @@ build/
 
 # Codex/Superpowers runtime scratch files
 .superpowers/
+
+# Isolated feature worktree
+raspisanie/vehicle-card/
