@@ -58,20 +58,6 @@ def repair_calendar(date_from: str = "", date_to: str = "", user=Depends(current
         return {"date_from": start_date.isoformat(), "date_to": end_date.isoformat(), "items": items}
     finally:
         con.close()
-@router.get("/vehicles/{bus_id}/card")
-def vehicle_card(bus_id: int, user=Depends(current_user)):
-    con = db.connect()
-    try:
-        vehicle = db.one(con.execute("SELECT * FROM buses WHERE id=?", (bus_id,)))
-        if not vehicle: raise HTTPException(404, "Автобус не найден")
-        marks = ",".join("?" for _ in ACTIVE)
-        active_orders = db.rows(con.execute(order_query() + f" WHERE ro.bus_id=? AND ro.status IN ({marks}) ORDER BY ro.id DESC", (bus_id, *ACTIVE)))
-        history = db.rows(con.execute("SELECT * FROM vehicle_repair_history WHERE bus_id=? ORDER BY closed_at DESC,id DESC", (bus_id,)))
-        totals = con.execute("SELECT COUNT(*),COALESCE(SUM(total_cost),0),COALESCE(SUM(downtime_hours),0) FROM vehicle_repair_history WHERE bus_id=?", (bus_id,)).fetchone()
-        plans = db.rows(con.execute("SELECT mp.*,rt.name repair_type_name FROM maintenance_plans mp JOIN repair_types rt ON rt.id=mp.repair_type_id WHERE mp.bus_id=? AND mp.active=1", (bus_id,)))
-        return {"vehicle": vehicle, "active_orders": active_orders, "history": history, "maintenance_plans": plans,
-                "totals": {"repairs": totals[0], "cost": totals[1], "downtime_hours": totals[2]}}
-    finally: con.close()
 @router.get("/metrics/downtime")
 def downtime_metrics(user=Depends(current_user)):
     con = db.connect()

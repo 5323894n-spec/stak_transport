@@ -19,6 +19,7 @@ from .api_repair_stock import router as repair_stock_router
 from .api_repair_stock_extra import router as repair_stock_extra_router
 from .api_repair_maintenance import router as repair_maintenance_router
 from .api_repair_dashboard import router as repair_dashboard_router
+from .api_vehicle_card import router as vehicle_card_router
 from .repair_reports import router as repair_reports_router
 from .api_repair_attachments import router as repair_attachments_router
 from .api_repair_workers import router as repair_workers_router
@@ -76,6 +77,7 @@ app.include_router(repair_control_router)
 app.include_router(repair_stock_router)
 app.include_router(repair_stock_extra_router)
 app.include_router(repair_maintenance_router)
+app.include_router(vehicle_card_router)
 app.include_router(repair_dashboard_router)
 app.include_router(repair_reports_router)
 app.include_router(repair_attachments_router)
