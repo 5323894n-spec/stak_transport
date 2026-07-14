@@ -3,6 +3,7 @@
 import sqlite3, json, os, datetime
 
 from .repair_schema import migrate_repairs
+from .route_schema import migrate_route_network
 
 DB_PATH = os.environ.get("ATP_DB", os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "atp.db"))
 
@@ -320,6 +321,7 @@ def init_db():
     con = connect()
     con.executescript(SCHEMA)
     migrate(con)
+    migrate_route_network(con)
     con.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_notifications_source_key ON notifications(source_key)")
     migrate_repairs(con)
     if not con.execute("SELECT 1 FROM norms").fetchone():
