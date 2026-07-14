@@ -7,6 +7,7 @@ from fastapi.responses import FileResponse
 from . import db
 from .auth import login as do_login, ensure_admin, current_user
 from .api_refs import router as refs_router
+from .api_route_network import router as route_network_router
 from .api_planning import router as planning_router
 from .api_waybills import router as waybills_router
 from .api_time import router as time_router
@@ -68,6 +69,7 @@ def me(user=Depends(current_user)):
     return user
 
 app.include_router(refs_router)
+app.include_router(route_network_router)
 app.include_router(planning_router)
 app.include_router(waybills_router)
 app.include_router(time_router)

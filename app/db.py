@@ -10,6 +10,8 @@ DB_PATH = os.environ.get("ATP_DB", os.path.join(os.path.dirname(os.path.dirname(
 def connect():
     con = sqlite3.connect(DB_PATH)
     con.row_factory = sqlite3.Row
+    con.create_function(
+        "lower", 1, lambda value: value.casefold() if isinstance(value, str) else value)
     con.execute("PRAGMA foreign_keys=ON")
     return con
 
