@@ -48,6 +48,12 @@ def _seconds(value):
     return 0
 
 
+def _coordinate(value):
+    if value is None:
+        return None
+    return round(float(value), 6)
+
+
 def _erm_rows(route):
     try:
         notes = json.loads(route.get("notes") or "{}")
@@ -71,8 +77,8 @@ def _erm_rows(route):
                 "sequence": sequence,
                 "name": str(stop.get("stop_name") or "").strip(),
                 "external_code": str(stop.get("stop_id") or "").strip() or None,
-                "latitude": stop.get("latitude"),
-                "longitude": stop.get("longitude"),
+                "latitude": _coordinate(stop.get("latitude", stop.get("lat"))),
+                "longitude": _coordinate(stop.get("longitude", stop.get("lon"))),
                 "address": stop.get("street"),
                 "distance_from_prev_km": float(distance or 0),
                 "cumulative_km": float(stop.get("cumulative_km") or 0),
