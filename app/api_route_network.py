@@ -8,6 +8,7 @@ from fastapi import APIRouter, Body, Depends, HTTPException
 from . import db
 from .auth import current_user, require_write
 from .route_network import recalculate_trace
+from .route_migration import migrate_route
 
 
 router = APIRouter(prefix="/api")
@@ -255,3 +256,53 @@ def stop_update(stop_id: int, payload: dict = Body(...), user=Depends(current_us
         con.close()
 
 
+@router.post("/routes/{route_id}/migrate-network")
+def route_network_migrate(route_id: int, user=Depends(current_user)):
+    require_write(user, "routes")
+    con = db.connect()
+    try:
+        result = migrate_route(con, route_id)
+        db.audit(
+            con, user["username"], "миграция трассы маршрута", "routes", route_id,
+            new=result,
+        )
+        con.commit()
+        return result
+    except ValueError as exc:
+        raise HTTPException(404 if str(exc) == "Маршрут не найден" else 400, str(exc))
+    finally:
+        con.close()
+
+
+@router.post("/routes/migrate-network")
+def route_network_migrate_all(user=Depends(current_user)):
+    require_write(user, "routes")
+    con = db.connect()
+    try:
+        route_ids = [row["id"] for row in con.execute("SELECT id FROM routes ORDER BY id")]
+        results = []
+        for route_id in route_ids:
+            con.execute("SAVEPOINT migrate_one_route")
+            try:
+                result = migrate_route(con, route_id)
+                con.execute("RELEASE SAVEPOINT migrate_one_route")
+            except Exception as exc:
+                con.execute("ROLLBACK TO SAVEPOINT migrate_one_route")
+                con.execute("RELEASE SAVEPOINT migrate_one_route")
+                result = {"route_id": route_id, "status": "failed", "error": str(exc)}
+            results.append(result)
+        summary = {
+            "total": len(results),
+            "migrated": sum(item["status"] == "migrated" for item in results),
+            "unchanged": sum(item["status"] == "unchanged" for item in results),
+            "needs_review": sum(item["status"] == "needs_review" for item in results),
+            "failed": sum(item["status"] == "failed" for item in results),
+        }
+        db.audit(
+            con, user["username"], "массовая миграция трасс", "routes", "all",
+            new={"summary": summary},
+        )
+        con.commit()
+        return {"summary": summary, "results": results}
+    finally:
+        con.close()
