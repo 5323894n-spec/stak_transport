@@ -8,6 +8,7 @@ import sqlite3
 from fastapi import APIRouter, Body, Depends, File, HTTPException, UploadFile
 
 from . import db
+from . import osrm
 from .auth import current_user, require_write
 from .route_import import apply_import_plan, build_import_plan, parse_network_file
 from .route_network import recalculate_trace
@@ -380,5 +381,131 @@ def route_network_import_apply(route_id: int, payload: dict = Body(...),
         )
         con.commit()
         return {"ok": True, **result}
+    finally:
+        con.close()
+@router.post("/routes/{route_id}/osrm/preview/{direction}")
+def route_osrm_preview(route_id: int, direction: str, user=Depends(current_user)):
+    require_write(user, "routes")
+    if direction not in ("forward", "backward"):
+        raise HTTPException(400, "Направление должно быть forward или backward")
+    con = db.connect()
+    try:
+        _route_or_404(con, route_id)
+        rows = _direction_rows(con, route_id, direction)
+        if len(rows) < 2:
+            raise HTTPException(400, "Для расчёта нужны минимум две остановки")
+        missing = [row["sequence"] for row in rows if (
+            row["stop"]["latitude"] is None or row["stop"]["longitude"] is None
+        )]
+        if missing:
+            raise HTTPException(400, "Не хватает координат остановок: " + ", ".join(map(str, missing)))
+        coordinates = [
+            (row["stop"]["longitude"], row["stop"]["latitude"]) for row in rows
+        ]
+        settings = db.get_settings(con)
+        try:
+            calculated = osrm.request_route(
+                coordinates,
+                base_url=settings.get("osrm_base_url", osrm.DEFAULT_BASE_URL),
+                timeout=10,
+            )
+        except osrm.OSRMTimeout as exc:
+            raise HTTPException(503, str(exc))
+        except osrm.OSRMError as exc:
+            raise HTTPException(502, str(exc))
+        diff = []
+        for index, leg in enumerate(calculated["legs"], start=1):
+            row = rows[index]
+            diff.append({
+                "route_stop_id": row["id"],
+                "sequence": row["sequence"],
+                "old_distance_km": row["distance_from_prev_km"],
+                "new_distance_km": round(leg["distance"] / 1000, 3),
+                "old_run_time_sec": row["run_time_sec"],
+                "new_run_time_sec": int(round(leg["duration"])),
+            })
+        plan = {
+            "kind": "osrm",
+            "route_id": route_id,
+            "direction": direction,
+            "diff": diff,
+            "geometry": calculated["geometry"],
+        }
+        token = secrets.token_hex(16)
+        created = datetime.datetime.now()
+        expires = created + datetime.timedelta(minutes=30)
+        con.execute(
+            "INSERT INTO route_import_previews("
+            "token,route_id,username,created_at,expires_at,source_name,payload_json"
+            ") VALUES(?,?,?,?,?,?,?)",
+            (token, route_id, user["username"], created.isoformat(timespec="seconds"),
+             expires.isoformat(timespec="seconds"), f"osrm:{direction}",
+             json.dumps(plan, ensure_ascii=False)),
+        )
+        con.commit()
+        return {
+            "preview_token": token,
+            "expires_at": expires.isoformat(timespec="seconds"),
+            "diff": diff,
+            "geometry": calculated["geometry"],
+        }
+    finally:
+        con.close()
+
+
+@router.post("/routes/{route_id}/osrm/apply/{direction}")
+def route_osrm_apply(route_id: int, direction: str, payload: dict = Body(...),
+                     user=Depends(current_user)):
+    require_write(user, "routes")
+    if direction not in ("forward", "backward"):
+        raise HTTPException(400, "Направление должно быть forward или backward")
+    token = str(payload.get("preview_token") or "").strip()
+    if not token:
+        raise HTTPException(400, "Не передан preview_token")
+    con = db.connect()
+    try:
+        preview = db.one(con.execute(
+            "SELECT * FROM route_import_previews WHERE token=? AND route_id=? AND username=?",
+            (token, route_id, user["username"]),
+        ))
+        if not preview or preview["source_name"] != f"osrm:{direction}":
+            raise HTTPException(404, "Предпросмотр OSRM не найден")
+        if preview["applied_at"]:
+            raise HTTPException(409, "Предпросмотр OSRM уже применён")
+        now = datetime.datetime.now()
+        if now > datetime.datetime.fromisoformat(preview["expires_at"]):
+            raise HTTPException(410, "Срок действия предпросмотра OSRM истёк")
+        plan = json.loads(preview["payload_json"])
+        if plan.get("kind") != "osrm" or plan.get("direction") != direction:
+            raise HTTPException(400, "Некорректный предпросмотр OSRM")
+        for item in plan["diff"]:
+            con.execute(
+                "UPDATE route_stops SET distance_from_prev_km=?,run_time_sec=?,"
+                "distance_source='auto_osrm',updated_at=? "
+                "WHERE id=? AND route_id=? AND direction=?",
+                (item["new_distance_km"], item["new_run_time_sec"],
+                 now.isoformat(timespec="seconds"), item["route_stop_id"], route_id, direction),
+            )
+        cumulative = 0.0
+        rows = db.rows(con.execute(
+            "SELECT id,distance_from_prev_km FROM route_stops "
+            "WHERE route_id=? AND direction=? ORDER BY sequence",
+            (route_id, direction),
+        ))
+        for row in rows:
+            cumulative = round(cumulative + float(row["distance_from_prev_km"] or 0), 3)
+            con.execute("UPDATE route_stops SET cumulative_km=? WHERE id=?", (cumulative, row["id"]))
+        length_field = "length_km" if direction == "forward" else "length_back_km"
+        con.execute(f"UPDATE routes SET {length_field}=? WHERE id=?", (cumulative, route_id))
+        con.execute(
+            "UPDATE route_import_previews SET applied_at=? WHERE token=?",
+            (now.isoformat(timespec="seconds"), token),
+        )
+        db.audit(
+            con, user["username"], "применение трассы OSRM", "routes", route_id,
+            new={"direction": direction, "diff": plan["diff"], "total_km": cumulative},
+        )
+        con.commit()
+        return {"ok": True, "direction": direction, "total_km": cumulative}
     finally:
         con.close()
