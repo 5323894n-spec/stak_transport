@@ -57,6 +57,19 @@ CREATE TABLE IF NOT EXISTS route_migration_log(
   created_at TEXT NOT NULL,
   UNIQUE(route_id,source_hash)
 );
+
+CREATE TABLE IF NOT EXISTS route_import_previews(
+  token TEXT PRIMARY KEY,
+  route_id INTEGER NOT NULL REFERENCES routes(id) ON DELETE CASCADE,
+  username TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  source_name TEXT NOT NULL,
+  payload_json TEXT NOT NULL,
+  applied_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_route_import_previews_route
+  ON route_import_previews(route_id,created_at);
 """
 
 

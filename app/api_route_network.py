@@ -1,12 +1,15 @@
 # -*- coding: utf-8 -*-
 """Остановки и упорядоченные трассы маршрутов."""
 import datetime
+import json
+import secrets
 import sqlite3
 
-from fastapi import APIRouter, Body, Depends, HTTPException
+from fastapi import APIRouter, Body, Depends, File, HTTPException, UploadFile
 
 from . import db
 from .auth import current_user, require_write
+from .route_import import apply_import_plan, build_import_plan, parse_network_file
 from .route_network import recalculate_trace
 from .route_migration import migrate_route
 
@@ -304,5 +307,78 @@ def route_network_migrate_all(user=Depends(current_user)):
         )
         con.commit()
         return {"summary": summary, "results": results}
+    finally:
+        con.close()
+@router.post("/routes/{route_id}/network-import/preview")
+async def route_network_import_preview(route_id: int, file: UploadFile = File(...),
+                                       user=Depends(current_user)):
+    require_write(user, "routes")
+    data = await file.read()
+    con = db.connect()
+    try:
+        _route_or_404(con, route_id)
+        try:
+            grouped = parse_network_file(file.filename or "", data)
+            plan = build_import_plan(con, route_id, grouped)
+        except (UnicodeError, ValueError) as exc:
+            raise HTTPException(400, str(exc))
+        token = secrets.token_hex(16)
+        created = datetime.datetime.now()
+        expires = created + datetime.timedelta(minutes=30)
+        con.execute(
+            "INSERT INTO route_import_previews("
+            "token,route_id,username,created_at,expires_at,source_name,payload_json"
+            ") VALUES(?,?,?,?,?,?,?)",
+            (token, route_id, user["username"], created.isoformat(timespec="seconds"),
+             expires.isoformat(timespec="seconds"), file.filename or "import",
+             json.dumps(plan, ensure_ascii=False, default=str)),
+        )
+        con.commit()
+        return {
+            "preview_token": token,
+            "expires_at": expires.isoformat(timespec="seconds"),
+            "summary": plan["summary"],
+            "conflicts": plan["conflicts"],
+            "rows": plan["rows"],
+        }
+    finally:
+        con.close()
+
+
+@router.post("/routes/{route_id}/network-import/apply")
+def route_network_import_apply(route_id: int, payload: dict = Body(...),
+                               user=Depends(current_user)):
+    require_write(user, "routes")
+    token = str(payload.get("preview_token") or "").strip()
+    if not token:
+        raise HTTPException(400, "Не передан preview_token")
+    con = db.connect()
+    try:
+        preview = db.one(con.execute(
+            "SELECT * FROM route_import_previews WHERE token=? AND route_id=? AND username=?",
+            (token, route_id, user["username"]),
+        ))
+        if not preview:
+            raise HTTPException(404, "Предпросмотр не найден")
+        if preview["applied_at"]:
+            raise HTTPException(409, "Предпросмотр уже применён")
+        now = datetime.datetime.now()
+        if now > datetime.datetime.fromisoformat(preview["expires_at"]):
+            raise HTTPException(410, "Срок действия предпросмотра истёк")
+        plan = json.loads(preview["payload_json"])
+        try:
+            result = apply_import_plan(con, route_id, plan, now.isoformat(timespec="seconds"))
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+        con.execute(
+            "UPDATE route_import_previews SET applied_at=? WHERE token=?",
+            (now.isoformat(timespec="seconds"), token),
+        )
+        db.audit(
+            con, user["username"], "импорт трассы маршрута", "routes", route_id,
+            new={"source_name": preview["source_name"], **result},
+        )
+        con.commit()
+        return {"ok": True, **result}
     finally:
         con.close()
