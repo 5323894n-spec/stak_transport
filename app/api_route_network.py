@@ -221,3 +221,37 @@ def route_stops_replace(route_id: int, direction: str, payload: dict = Body(...)
         raise HTTPException(400, str(exc))
     finally:
         con.close()
+@router.put("/stops/{stop_id}")
+def stop_update(stop_id: int, payload: dict = Body(...), user=Depends(current_user)):
+    require_write(user, "routes")
+    con = db.connect()
+    try:
+        old = _stop_or_404(con, stop_id)
+        values = {field: payload.get(field) for field in STOP_FIELDS if field in payload}
+        if not values:
+            raise HTTPException(400, "Нет данных для изменения")
+        if "name" in values:
+            values["name"] = str(values["name"] or "").strip()
+            if not values["name"]:
+                raise HTTPException(400, "Укажите наименование остановки")
+        if "external_code" in values:
+            code = str(values["external_code"] or "").strip()
+            values["external_code"] = code or None
+        values["updated_at"] = _now()
+        fields = list(values)
+        con.execute(
+            f"UPDATE stops SET {','.join(field + '=?' for field in fields)} WHERE id=?",
+            [values[field] for field in fields] + [stop_id],
+        )
+        db.audit(
+            con, user["username"], "изменение остановки", "stops", stop_id,
+            old={field: old.get(field) for field in fields}, new=values,
+        )
+        con.commit()
+        return {"ok": True}
+    except sqlite3.IntegrityError:
+        raise HTTPException(400, "Код остановки уже используется")
+    finally:
+        con.close()
+
+
