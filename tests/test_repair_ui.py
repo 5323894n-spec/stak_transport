@@ -64,4 +64,4 @@ def test_repair_menu_and_working_request_screen_are_present():
 
 def test_index_uses_current_app_cache_version():
     text = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
-    assert '/static/app.js?v=3.1' in text
+    assert '/static/app.js?v=3.2' in text

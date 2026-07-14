@@ -62,7 +62,7 @@ async def upload_attachment(order_id: int, file: UploadFile = File(...), categor
 @router.get("/attachments/{attachment_id}/download")
 def download_attachment(attachment_id: int, user=Depends(current_user)):
     con = db.connect()
-    try: item = db.one(con.execute("SELECT * FROM repair_attachments WHERE id=?", (attachment_id,)))
+    try: item = db.one(con.execute("SELECT * FROM repair_attachments WHERE id=? AND cancelled_at IS NULL", (attachment_id,)))
     finally: con.close()
     if not item: raise HTTPException(404, "Вложение не найдено")
     root = upload_root(); path = (root / item["stored_name"]).resolve()

@@ -10,7 +10,7 @@ from .repair_service import audit_change, calculate_downtime, record_order_statu
 router = APIRouter(tags=["repair-control"])
 
 def get_order(con, order_id):
-    item = db.one(con.execute("SELECT ro.*,ro.number order_number,rr.number request_number FROM repair_orders ro LEFT JOIN repair_requests rr ON rr.id=ro.request_id WHERE ro.id=?", (order_id,)))
+    item = db.one(con.execute("SELECT ro.*,ro.number order_number,rr.number request_number,u.full_name master_name FROM repair_orders ro LEFT JOIN repair_requests rr ON rr.id=ro.request_id LEFT JOIN users u ON u.id=ro.responsible_master_id WHERE ro.id=?", (order_id,)))
     if not item: raise HTTPException(404, "Заказ-наряд не найден")
     return item
 
@@ -55,8 +55,8 @@ def close_order(order_id: int, payload: dict = Body(default={}), user=Depends(cu
         if old.get("request_id"): con.execute("UPDATE repair_requests SET status='закрыта',closed_at=? WHERE id=?", (now, old["request_id"]))
         con.execute("UPDATE buses SET status='исправен',last_to_date=? WHERE id=?", (now[:10], old["bus_id"]))
         con.execute(
-            "INSERT INTO vehicle_repair_history(bus_id,order_id,request_number,order_number,opened_at,closed_at,odometer,result,operations_json,workers_json,parts_json,total_cost,downtime_hours) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (old["bus_id"], order_id, old.get("request_number") or "", old["order_number"], old.get("created_at"), now, old.get("odometer_in"), result, json.dumps(operations, ensure_ascii=False), json.dumps(workers, ensure_ascii=False), json.dumps(parts, ensure_ascii=False), old.get("total_cost") or 0, downtime))
+            "INSERT INTO vehicle_repair_history(bus_id,order_id,request_number,order_number,opened_at,closed_at,odometer,result,operations_json,workers_json,parts_json,labor_cost,parts_cost,external_cost,other_cost,total_cost,downtime_hours,master_name) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (old["bus_id"], order_id, old.get("request_number") or "", old["order_number"], old.get("created_at"), now, old.get("odometer_in"), result, json.dumps(operations, ensure_ascii=False), json.dumps(workers, ensure_ascii=False), json.dumps(parts, ensure_ascii=False), old.get("labor_cost") or 0, old.get("parts_cost") or 0, old.get("external_cost") or 0, old.get("other_cost") or 0, old.get("total_cost") or 0, downtime, old.get("master_name") or ""))
         item = get_order(con, order_id); audit_change(con, user, "закрытие заказ-наряда", "repair_order", order_id, old=old, new=item)
         db.notify(con, "информация", "ремонт", f"Заказ-наряд {old['order_number']} закрыт, автобус допущен к эксплуатации")
         con.commit(); return item

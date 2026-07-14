@@ -19,12 +19,16 @@ from .api_repair_stock import router as repair_stock_router
 from .api_repair_stock_extra import router as repair_stock_extra_router
 from .api_repair_maintenance import router as repair_maintenance_router
 from .api_repair_dashboard import router as repair_dashboard_router
+from .api_vehicle_card import router as vehicle_card_router
 from .repair_reports import router as repair_reports_router
 from .api_repair_attachments import router as repair_attachments_router
 from .api_repair_workers import router as repair_workers_router
 from .repair_print import router as repair_print_router
 from .api_repair_repeats import router as repair_repeats_router
 from .api_repair_alerts import router as repair_alerts_router
+from .api_vehicle_incidents import router as vehicle_incidents_router
+from .api_vehicle_media import router as vehicle_media_router
+from .vehicle_card_reports import router as vehicle_card_reports_router
 
 app = FastAPI(title="АТП — планирование и путевые листы", version="1.0")
 
@@ -75,6 +79,7 @@ app.include_router(repair_control_router)
 app.include_router(repair_stock_router)
 app.include_router(repair_stock_extra_router)
 app.include_router(repair_maintenance_router)
+app.include_router(vehicle_card_router)
 app.include_router(repair_dashboard_router)
 app.include_router(repair_reports_router)
 app.include_router(repair_attachments_router)
@@ -82,6 +87,9 @@ app.include_router(repair_workers_router)
 app.include_router(repair_print_router)
 app.include_router(repair_repeats_router)
 app.include_router(repair_alerts_router)
+app.include_router(vehicle_incidents_router)
+app.include_router(vehicle_media_router)
+app.include_router(vehicle_card_reports_router)
 
 STATIC = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "static")
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
