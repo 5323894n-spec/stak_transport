@@ -172,3 +172,11 @@ def test_erm_route_import_updates_existing_route_by_number(tmp_path):
     assert route["version"] == 4
     notes = json.loads(route["notes"])
     assert notes["previous_notes"] == "ручная заметка"
+    network = client.get(f"/api/routes/{data['route_id']}/network").json()
+    assert [row["stop"]["external_code"] for row in network["forward"]] == [
+        "100", "101", "102"
+    ]
+    assert network["forward"][0]["stop"]["latitude"] == 56.801
+    assert network["forward"][-1]["cumulative_km"] == 1.5
+    assert network["forward"][1]["run_time_sec"] == 180
+    assert network["backward"][-1]["cumulative_km"] == 1.3

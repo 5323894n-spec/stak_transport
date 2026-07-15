@@ -91,7 +91,8 @@ function route() {
   const view = parts[0] || "dashboard";
   const args = parts.slice(1).map(decodeURIComponent);
   document.querySelectorAll("#nav a").forEach(a => a.classList.toggle("active", a.dataset.view === view));
-  $("page-title").textContent = TITLES[view] || (view === "vehicleCard" ? "Карточка автобуса" : view);
+  const cardTitle = view === "vehicleCard" ? "Карточка автобуса" : view === "routeCard" ? "Карточка маршрута" : view;
+  $("page-title").textContent = TITLES[view] || cardTitle;
   const fn = VIEWS[view] || VIEWS.dashboard;
   $("content").innerHTML = "<div class='muted'>Загрузка…</div>";
   fn(...args).catch(e => { $("content").innerHTML = `<div class="vio"><b>Ошибка</b>${esc(e.message)}</div>`; });
@@ -1474,7 +1475,20 @@ VIEWS.buses = async function () {
   const rows = d.items.map(item => `<tr>${cfg.cols.map(([k, , fmt]) => `<td>${fmt ? fmt(item[k]) : esc(item[k])}</td>`).join("")}<td style="white-space:nowrap"><button class="btn small" onclick="openVehicleCard(${item.id})">Карточка</button> <button class="btn small ghost" onclick="refEdit('buses',${item.id})">изменить</button> <button class="btn small ghost" onclick="refDel('buses',${item.id})">✕</button></td></tr>`).join("");
   $("content").innerHTML = `<div class="toolbar"><input style="min-width:330px" placeholder="Поиск по гаражному номеру, госномеру или VIN" value="${esc(q)}" onchange="_q_buses=this.value;route()"><button class="btn" onclick="refEdit('buses',0)">+ Добавить</button><button class="btn sec" onclick="openWin('/api/refs/buses/export.xlsx')">Экспорт в Excel</button><label class="btn sec">Импорт из Excel<input type="file" accept=".xlsx" style="display:none" onchange="refImport('buses',this)"></label><span class="muted">${d.items.length} записей</span></div>${tbl([...cfg.cols.map(c => c[1]), "Действия"], rows || `<tr><td colspan="${cfg.cols.length + 1}">Автобусы не найдены</td></tr>`)}`;
 };
-VIEWS.routes = refView("routes");
+VIEWS.routes = async function () {
+  const q = window._q_routes || "";
+  const cfg = REF_CFG.routes;
+  const data = await api(`/api/refs/${cfg.table}?q=${encodeURIComponent(q)}`);
+  const rows = data.items.map(item => `<tr>${cfg.cols.map(([key, , fmt]) => `<td>${fmt ? fmt(item[key]) : esc(item[key])}</td>`).join("")}
+    <td style="white-space:nowrap"><button class="btn small" onclick="routeCardOpen(${item.id})">Карточка</button>
+    <button class="btn small ghost" onclick="refEdit('routes',${item.id})">изменить</button>
+    <button class="btn small ghost" onclick="refDel('routes',${item.id})">✕</button></td></tr>`).join("");
+  $("content").innerHTML = `<div class="toolbar"><input placeholder="поиск…" value="${esc(q)}" onchange="_q_routes=this.value;route()">
+    <button class="btn" onclick="refEdit('routes',0)">+ Добавить</button><button class="btn sec" onclick="openWin('/api/refs/routes/export.xlsx')">Экспорт в Excel</button>
+    <label class="btn sec">Импорт из Excel<input type="file" accept=".xlsx" hidden onchange="refImport('routes',this)"></label>
+    <label class="btn sec">Импорт ЭРМ<input type="file" accept=".xlsx" hidden onchange="routeErmImport(this)"></label>
+    <span class="muted">${data.items.length} записей</span></div>${tbl([...cfg.cols.map(c => c[1]), "Действия"], rows || `<tr><td colspan="${cfg.cols.length + 1}">Маршруты не найдены</td></tr>`)}`;
+};
 async function refEdit(kind, id) {
   const cfg = REF_CFG[kind];
   const cur = id ? (await api(`/api/refs/${cfg.table}`)).items.find(x => x.id === id) : {};
