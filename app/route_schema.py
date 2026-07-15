@@ -70,6 +70,65 @@ CREATE TABLE IF NOT EXISTS route_import_previews(
 );
 CREATE INDEX IF NOT EXISTS idx_route_import_previews_route
   ON route_import_previews(route_id,created_at);
+
+CREATE TABLE IF NOT EXISTS day_periods(
+  id INTEGER PRIMARY KEY,
+  route_id INTEGER NOT NULL REFERENCES routes(id) ON DELETE CASCADE,
+  day_type TEXT NOT NULL,
+  name TEXT NOT NULL,
+  start_min INTEGER NOT NULL,
+  end_min INTEGER NOT NULL,
+  interval_min INTEGER NOT NULL,
+  travel_time_factor REAL NOT NULL DEFAULT 1.0,
+  transition_mode TEXT NOT NULL DEFAULT 'abrupt',
+  transition_window_min INTEGER NOT NULL DEFAULT 0,
+  color TEXT NOT NULL DEFAULT '#3b82f6',
+  priority INTEGER NOT NULL DEFAULT 0,
+  active INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_day_periods_route_day
+  ON day_periods(route_id,day_type,start_min,end_min);
+
+CREATE TABLE IF NOT EXISTS period_templates(
+  id INTEGER PRIMARY KEY,
+  name TEXT NOT NULL UNIQUE,
+  description TEXT,
+  active INTEGER NOT NULL DEFAULT 1,
+  version INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS period_template_items(
+  id INTEGER PRIMARY KEY,
+  template_id INTEGER NOT NULL REFERENCES period_templates(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  start_min INTEGER NOT NULL,
+  end_min INTEGER NOT NULL,
+  interval_min INTEGER NOT NULL,
+  travel_time_factor REAL NOT NULL DEFAULT 1.0,
+  transition_mode TEXT NOT NULL DEFAULT 'abrupt',
+  transition_window_min INTEGER NOT NULL DEFAULT 0,
+  color TEXT NOT NULL DEFAULT '#3b82f6',
+  priority INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_period_template_items_template
+  ON period_template_items(template_id,start_min,priority);
+
+CREATE TABLE IF NOT EXISTS period_previews(
+  token TEXT PRIMARY KEY,
+  route_id INTEGER NOT NULL REFERENCES routes(id) ON DELETE CASCADE,
+  day_type TEXT NOT NULL,
+  username TEXT NOT NULL,
+  payload_json TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  applied_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_period_previews_route_day
+  ON period_previews(route_id,day_type,created_at);
 """
 
 
