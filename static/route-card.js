@@ -15,7 +15,7 @@ function routeCardState(routeId) {
     window._routeCard = {
       routeId: +routeId, tab: "passport", direction: "forward", network: null,
       drafts: {}, osrmPreview: null, importPreview: null, geometry: null,
-      periodDay: "weekday", periodDrafts: {}, periodTemplates: [],
+      periodDay: "будни", periodDrafts: {}, periodTemplates: [],
       periodTemplateId: "", periodTemplatePreview: null,
       periodCalcPreview: null, periodError: "", periodContinuous: false,
       periodsLoading: false,
@@ -492,8 +492,8 @@ function routeCardPeriods(state) {
     <input type="color" value="${esc(row.color)}" onchange="routeCardPeriodChange(${index},'color',this.value)">
     <div class="route-period-actions"><button class="btn small sec" onclick="routeCardPeriodMove(${index},-1)" ${index ? "" : "disabled"}>↑</button><button class="btn small sec" onclick="routeCardPeriodMove(${index},1)" ${index + 1 < rows.length ? "" : "disabled"}>↓</button><button class="btn small sec" onclick="routeCardPeriodDuplicate(${index})">Копия</button><button class="btn small danger" onclick="routeCardPeriodRemove(${index})">✕</button></div></div>`).join("");
   const templateOptions = state.periodTemplates.map(item => `<option value="${item.id}" ${+state.periodTemplateId === item.id ? "selected" : ""}>${esc(item.name)}</option>`).join("");
-  return `<div class="route-card-toolbar"><label>Тип дня <select onchange="routeCardPeriodDay(this.value)"><option value="weekday" ${state.periodDay === "weekday" ? "selected" : ""}>Будни</option><option value="weekend" ${state.periodDay === "weekend" ? "selected" : ""}>Выходные</option><option value="holiday" ${state.periodDay === "holiday" ? "selected" : ""}>Праздники</option></select></label>
-    <label><input type="checkbox" ${state.periodContinuous ? "checked" : ""} onchange="state=window._routeCard;state.periodContinuous=this.checked"> Без разрывов</label><button class="btn sec" onclick="routeCardPeriodAdd()">+ Период</button><button class="btn" onclick="routeCardPeriodSave()">Сохранить все</button></div>
+  return `<div class="route-card-toolbar"><label>Тип дня <select onchange="routeCardPeriodDay(this.value)"><option value="будни" ${state.periodDay === "будни" ? "selected" : ""}>Будни</option><option value="суббота" ${state.periodDay === "суббота" ? "selected" : ""}>Суббота</option><option value="воскресенье" ${state.periodDay === "воскресенье" ? "selected" : ""}>Воскресенье</option></select></label>
+    <label><input type="checkbox" ${state.periodContinuous ? "checked" : ""} onchange="window._routeCard.periodContinuous=this.checked"> Без разрывов</label><button class="btn sec" onclick="routeCardPeriodAdd()">+ Период</button><button class="btn" onclick="routeCardPeriodSave()">Сохранить все</button></div>
     ${state.periodError ? `<div class="vio r"><b>Не удалось выполнить действие</b>${esc(state.periodError)}. Правки сохранены в форме.</div>` : ""}
     <div class="route-period-grid">${editor || '<div class="route-empty">Периоды ещё не заданы</div>'}</div>${routeCardPeriodTimeline(rows)}
     <section class="panel"><h3>Шаблоны и расчёт</h3><div class="route-template-actions"><select onchange="window._routeCard.periodTemplateId=this.value"><option value="">Выберите шаблон</option>${templateOptions}</select><button class="btn sec" onclick="routeCardTemplatePreview()">Предпросмотр шаблона</button><button class="btn" onclick="routeCardPeriodPreview()">Рассчитать расписание</button></div></section>

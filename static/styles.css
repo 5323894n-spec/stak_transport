@@ -225,6 +225,10 @@ label.f > * { display: block; width: 100%; margin-top: 3px; color: var(--text); 
 .route-demand-grid { grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); }
 .route-demand-jump { margin-top: 8px; }
 .route-preview-times { margin: 12px 0; line-height: 1.8; }
+.schedule-preview-head { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; }
+.schedule-preview-head h3 { margin: 0 0 4px; }
+.schedule-preview-departures { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 12px; max-height: 150px; overflow: auto; }
+.schedule-preview-departures span { padding: 4px 7px; border-radius: 6px; background: #e8f1fb; color: #1e4f86; font-variant-numeric: tabular-nums; }
 @media (max-width: 900px) {
   .route-passport { grid-template-columns: 1fr; }
   .route-kpis { grid-template-columns: repeat(2, 1fr); }
