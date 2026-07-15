@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 """Проверка периодов дня и расчёт интервальных предпросмотров."""
 
+import math
+
 VALID_TRANSITIONS = {"abrupt", "smooth"}
 
 
@@ -81,3 +83,76 @@ def validate_periods(
         ):
             raise ValueError("Периоды не покрывают окончание работы")
     return normalized
+
+
+def _gap_for_period(period, previous_interval, elapsed):
+    target = period["interval_min"]
+    window = period.get("transition_window_min", 0)
+    if (
+        period.get("transition_mode") != "smooth"
+        or not window
+        or previous_interval is None
+    ):
+        return target
+    progress = min(1.0, max(0.0, elapsed / window))
+    return max(
+        1,
+        round(previous_interval + (target - previous_interval) * progress),
+    )
+
+
+def calculate_period_preview(
+    items,
+    *,
+    forward_min,
+    backward_min,
+    terminal_layover_min=6,
+):
+    """Generate a non-destructive departure and vehicle-demand preview."""
+    forward_min = int(forward_min)
+    backward_min = int(backward_min)
+    terminal_layover_min = int(terminal_layover_min)
+    if forward_min <= 0 or backward_min <= 0:
+        raise ValueError("Время рейса должно быть положительным")
+    if terminal_layover_min < 0:
+        raise ValueError("Конечный отстой не может быть отрицательным")
+
+    periods = validate_periods(items)
+    departures = []
+    summaries = []
+    previous_interval = None
+    for period in periods:
+        factor = period["travel_time_factor"]
+        cycle = math.ceil(
+            (forward_min + backward_min) * factor + terminal_layover_min * 2
+        )
+        demand = math.ceil(cycle / period["interval_min"])
+        summaries.append({**period, "cycle_min": cycle, "buses_required": demand})
+        cursor = (
+            period["start_min"]
+            if not departures
+            else max(period["start_min"], departures[-1] + 1)
+        )
+        while cursor < period["end_min"]:
+            if not departures or cursor > departures[-1]:
+                departures.append(cursor)
+            elapsed = cursor - period["start_min"]
+            cursor += _gap_for_period(period, previous_interval, elapsed)
+        previous_interval = period["interval_min"]
+
+    warnings = []
+    for previous, current in zip(summaries, summaries[1:]):
+        delta = current["buses_required"] - previous["buses_required"]
+        if abs(delta) >= 2:
+            warnings.append({
+                "code": "demand_jump", "from": previous.get("name", ""),
+                "to": current.get("name", ""), "delta": delta,
+            })
+    return {
+        "departures": departures,
+        "periods": summaries,
+        "max_buses_required": max(
+            (period["buses_required"] for period in summaries), default=0
+        ),
+        "warnings": warnings,
+    }
