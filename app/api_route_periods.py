@@ -9,7 +9,7 @@ from fastapi import APIRouter, Body, Depends, HTTPException
 
 from . import db
 from .auth import current_user, require_write
-from .route_periods import validate_periods
+from .route_periods import calculate_period_preview, validate_periods
 
 
 router = APIRouter(prefix="/api")
@@ -346,6 +346,56 @@ def template_apply(route_id: int, day_type: str, payload: dict = Body(...),
         return {"ok": True, "items": saved, "applied_at": applied_at}
     except ValueError as exc:
         con.rollback()
+        raise HTTPException(400, str(exc))
+    finally:
+        con.close()
+
+
+def _format_minute(minute):
+    return f"{minute // 60:02d}:{minute % 60:02d}"
+
+
+@router.post("/routes/{route_id}/periods/{day_type}/preview")
+def periods_preview(
+    route_id: int,
+    day_type: str,
+    payload: dict = Body(...),
+    user=Depends(current_user),
+):
+    """Calculate departures and vehicle demand without changing route_trips."""
+    con = db.connect()
+    try:
+        route = con.execute(
+            "SELECT id,number,name,trip_time_min,trip_time_back_min "
+            "FROM routes WHERE id=?",
+            (route_id,),
+        ).fetchone()
+        if not route:
+            raise HTTPException(404, "Маршрут не найден")
+        periods = _period_rows(con, route_id, day_type)
+        if not periods:
+            raise HTTPException(400, "Для маршрута не заданы периоды движения")
+        forward = route["trip_time_min"]
+        backward = route["trip_time_back_min"]
+        if not forward or not backward:
+            raise HTTPException(400, "Для маршрута не задано время движения")
+        result = calculate_period_preview(
+            periods,
+            forward_min=forward,
+            backward_min=backward,
+            terminal_layover_min=payload.get("terminal_layover_min", 6),
+        )
+        result["departures"] = [
+            {"minute": minute, "time": _format_minute(minute)}
+            for minute in result["departures"]
+        ]
+        result["route"] = {
+            "id": route["id"], "number": route["number"], "name": route["name"],
+            "forward_min": int(forward), "backward_min": int(backward),
+        }
+        result["day_type"] = day_type
+        return result
+    except ValueError as exc:
         raise HTTPException(400, str(exc))
     finally:
         con.close()
