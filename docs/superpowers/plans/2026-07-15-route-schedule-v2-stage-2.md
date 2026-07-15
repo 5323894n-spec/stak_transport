@@ -113,7 +113,8 @@ CREATE TABLE IF NOT EXISTS period_previews(
   username TEXT NOT NULL,
   payload_json TEXT NOT NULL,
   created_at TEXT NOT NULL,
-  expires_at TEXT NOT NULL
+  expires_at TEXT NOT NULL,
+  applied_at TEXT
 );
 ```
 
@@ -548,7 +549,7 @@ POST   /api/routes/{route_id}/periods/{day_type}/template-preview
 POST   /api/routes/{route_id}/periods/{day_type}/template-apply
 ```
 
-Preview stores the normalized proposed set and old/new diff in `period_previews` for 30 minutes. Apply validates token ownership, expiry, route/day match, and one-time use, then replaces the complete set and audits in one transaction. Add `applied_at TEXT` to `period_previews` in Task 1 DDL before implementing this task.
+Preview stores the normalized proposed set and old/new diff in `period_previews` for 30 minutes. Apply validates token ownership, expiry, route/day match, and `applied_at IS NULL`, then replaces the complete set, marks the token used, and audits in one transaction.
 
 - [ ] **Step 4: Run template and period API tests**
 
