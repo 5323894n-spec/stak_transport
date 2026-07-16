@@ -1024,6 +1024,36 @@ function scheduleTimeline(trips, problems) {
   </div>`;
 }
 
+function schedulePeriodPreviewPanel(st) {
+  const result = st.periodPreview;
+  if (!result) return "";
+  const periods = result.periods.map(row => `<div class="card"><b>${esc(row.name)}</b><div class="num">${esc(row.buses_required)}</div><div class="lbl">автобусов · цикл ${esc(row.cycle_min)} мин<br>интервал ${esc(row.interval_min)} мин · коэффициент ${esc(row.travel_time_factor)}</div></div>`).join("");
+  const warnings = result.warnings.map(row => `<div class="vio w route-demand-jump"><b>Изменение потребности ${row.delta > 0 ? "+" : ""}${esc(row.delta)}</b>${esc(row.from)} → ${esc(row.to)}</div>`).join("");
+  return `<section class="panel schedule-period-preview"><div class="schedule-preview-head"><div><h3>Предпросмотр по периодам</h3><p class="muted">Это расчёт: сохранённая таблица route_trips и действующие рейсы не изменены.</p></div><span class="badge b-inf">только просмотр</span></div>
+    <div class="cards route-demand-grid"><div class="card"><div class="num">${esc(result.max_buses_required)}</div><div class="lbl">максимум автобусов</div></div>${periods}</div>
+    <div class="schedule-preview-departures">${result.departures.map(row => `<span>${esc(row.time)}</span>`).join("")}</div>${warnings}</section>`;
+}
+
+async function schedulePeriodPreview() {
+  const st = window._sched;
+  try {
+    st.periodPreview = await api(
+      `/api/routes/${st.route_id}/periods/${st.day_type}/preview`,
+      { method: "POST", body: { terminal_layover_min: 6 } },
+    );
+    route();
+  } catch (error) { toast(error.message, true); }
+}
+
+function scheduleOpenPeriods() {
+  const st = window._sched;
+  const card = routeCardState(st.route_id);
+  card.tab = "periods";
+  card.periodDay = st.day_type;
+  routeCardOpen(st.route_id);
+}
+
+
 VIEWS.schedule = async function () {
   const st = window._sched || { route_id: REFS.routes[0] ? REFS.routes[0].id : 0, day_type: "\u0431\u0443\u0434\u043d\u0438", q: "" };
   window._sched = st;
@@ -1051,7 +1081,7 @@ VIEWS.schedule = async function () {
   }).join("");
   $("content").innerHTML = `<div class="schedule-hero">
       <div class="toolbar">
-        <select onchange="_sched.route_id=+this.value; route()">
+        <select onchange="_sched.route_id=+this.value;_sched.periodPreview=null;route()">
           ${REFS.routes.map(r => `<option value="${r.id}" ${r.id === st.route_id ? "selected" : ""}>\u2116 ${esc(r.number)} \u2014 ${esc(r.name || "")} (${esc(r.comm_type)})</option>`).join("")}
         </select>
         <div class="tabs" style="margin:0; border:none">
@@ -1069,6 +1099,8 @@ VIEWS.schedule = async function () {
       </div>
     </div>
     ${scheduleCards(sum)}
+        <button class="btn sec" onclick="schedulePeriodPreview()">Предпросмотр по периодам</button>
+        <button class="btn ghost" onclick="scheduleOpenPeriods()">Настроить периоды</button>
     <div class="schedule-layout">
       <div>
         <div class="panel"><h3>\u0420\u0435\u0439\u0441\u044b (${visibleTrips.length}/${tr.items.length})</h3>${tbl(["\u0412\u044b\u0445\u043e\u0434", "\u0421\u043c\u0435\u043d\u0430", "\u2116", "\u041d\u0430\u043f\u0440.", "\u041e\u0442\u043f\u0440.", "\u041f\u0440\u0438\u0431.", "\u041a\u043c", "\u041e\u0442\u0441\u0442\u043e\u0439", "\u041f\u0440\u043e\u0432\u0435\u0440\u043a\u0430", ""], trips)}</div>
@@ -1077,6 +1109,7 @@ VIEWS.schedule = async function () {
       <div>
         <div class="panel"><h3>\u041e\u0448\u0438\u0431\u043a\u0438 \u0438 \u0440\u0435\u043a\u043e\u043c\u0435\u043d\u0434\u0430\u0446\u0438\u0438</h3>${chk.problems.length ? chk.problems.map(p =>
           `<div class="vio ${p.severity === "\u043f\u0440\u0435\u0434\u0443\u043f\u0440\u0435\u0436\u0434\u0435\u043d\u0438\u0435" ? "w" : ""}"><b>${sevBadge(p.severity)} ${esc(p.kind)}</b>${esc(p.message)}<br><span class="muted">${esc(p.recommendation || "")}</span></div>`).join("") : '<span class="badge b-ok">\u0417\u0430\u043c\u0435\u0447\u0430\u043d\u0438\u0439 \u043d\u0435 \u043d\u0430\u0439\u0434\u0435\u043d\u043e</span>'}</div>
+    ${schedulePeriodPreviewPanel(st)}
         <div class="panel"><h3>\u0412\u044b\u0445\u043e\u0434\u044b \u0438 \u0441\u043c\u0435\u043d\u044b</h3>${tbl(["\u0412\u044b\u0445\u043e\u0434", "\u0421\u043c\u0435\u043d\u0430", "\u0412\u0440\u0435\u043c\u044f", "\u0420\u0435\u0439\u0441\u043e\u0432", "\u041a\u043c", "\u0427\u0430\u0441\u044b", "\u041d\u043e\u0447\u043d\u044b\u0435"], outs)}</div>
       </div>
     </div>`;

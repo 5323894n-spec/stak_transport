@@ -4,6 +4,7 @@
 const ROUTE_CARD_TABS = [
   ["passport", "Паспорт"], ["stops", "Остановки и направления"],
   ["map", "Схема трассы"], ["segments", "Перегоны и время"],
+  ["periods", "Периоды дня"],
   ["history", "Импорт и история"],
 ];
 
@@ -14,6 +15,10 @@ function routeCardState(routeId) {
     window._routeCard = {
       routeId: +routeId, tab: "passport", direction: "forward", network: null,
       drafts: {}, osrmPreview: null, importPreview: null, geometry: null,
+      periodDay: "будни", periodDrafts: {}, periodTemplates: [],
+      periodTemplateId: "", periodTemplatePreview: null,
+      periodCalcPreview: null, periodError: "", periodContinuous: false,
+      periodsLoading: false,
     };
   }
   return window._routeCard;
@@ -51,12 +56,16 @@ VIEWS.routeCard = async function routeCardView(routeId) {
   const state = routeCardState(routeId);
   state.network = await api(`/api/routes/${state.routeId}/network`);
   renderRouteCard(state);
+  if (state.tab === "periods") await routeCardLoadPeriods();
 };
 
-function routeCardTab(tab) {
+async function routeCardTab(tab) {
   const state = window._routeCard;
   state.tab = tab;
   renderRouteCard(state);
+  if (tab === "periods" && !state.periodDrafts[state.periodDay]) {
+    await routeCardLoadPeriods();
+  }
 }
 
 function routeCardDirection(direction) {
@@ -298,11 +307,205 @@ async function routeCardMigrate() {
   await routeCardReload();
 }
 
+function routePeriodTime(value) {
+  const minute = Math.max(0, +(value || 0));
+  return `${String(Math.floor(minute / 60)).padStart(2, "0")}:${String(minute % 60).padStart(2, "0")}`;
+}
+
+function routeCardPeriodRows(state = window._routeCard) {
+  return state.periodDrafts[state.periodDay] || [];
+}
+
+async function routeCardLoadPeriods() {
+  const state = window._routeCard;
+  state.periodsLoading = true; state.periodError = ""; renderRouteCard(state);
+  try {
+    const [periods, templates] = await Promise.all([
+      api(`/api/routes/${state.routeId}/periods/${state.periodDay}`),
+      api("/api/period-templates"),
+    ]);
+    state.periodDrafts[state.periodDay] = (periods.items || []).map((row, index) => ({
+      name: row.name || `Период ${index + 1}`,
+      start: routePeriodTime(row.start_min), end: routePeriodTime(row.end_min),
+      interval_min: row.interval_min, travel_time_factor: row.travel_time_factor || 1,
+      transition_mode: row.transition_mode || "abrupt",
+      transition_window_min: row.transition_window_min || 0,
+      color: row.color || "#3b82f6", priority: row.priority == null ? index : row.priority,
+    }));
+    state.periodTemplates = templates.items || [];
+  } catch (error) { state.periodError = error.message; }
+  state.periodsLoading = false; renderRouteCard(state);
+}
+
+async function routeCardPeriodDay(value) {
+  const state = window._routeCard;
+  state.periodDay = value; state.periodTemplatePreview = null;
+  state.periodCalcPreview = null; state.periodError = "";
+  if (state.periodDrafts[value]) renderRouteCard(state); else await routeCardLoadPeriods();
+}
+
+function routeCardPeriodChange(index, field, value) {
+  routeCardPeriodRows()[index][field] = value;
+  window._routeCard.periodError = "";
+}
+
+function routeCardPeriodAdd() {
+  const rows = routeCardPeriodRows(), previous = rows[rows.length - 1];
+  const start = previous ? previous.end : "06:00";
+  const hour = Math.min(47, +(start.split(":")[0] || 6) + 4);
+  rows.push({ name: `Период ${rows.length + 1}`, start, end: `${String(hour).padStart(2, "0")}:00`,
+    interval_min: 15, travel_time_factor: 1, transition_mode: "abrupt",
+    transition_window_min: 0, color: "#3b82f6", priority: rows.length });
+  renderRouteCard(window._routeCard);
+}
+
+function routeCardPeriodDuplicate(index) {
+  const rows = routeCardPeriodRows(), source = rows[index];
+  const duration = Math.max(1, routePeriodMinutes(source.end) - routePeriodMinutes(source.start));
+  const start = routePeriodMinutes(source.end), end = Math.min(2879, start + duration);
+  rows.splice(index + 1, 0, { ...source, name: `${source.name} — копия`,
+    start: routePeriodTime(start), end: routePeriodTime(end) });
+  rows.forEach((row, position) => { row.priority = position; });
+  renderRouteCard(window._routeCard);
+}
+
+function routePeriodMinutes(value) {
+  const [hours, minutes] = String(value || "0:0").split(":").map(Number);
+  return hours * 60 + minutes;
+}
+
+function routeCardPeriodMove(index, delta) {
+  const rows = routeCardPeriodRows(), next = index + delta;
+  if (next < 0 || next >= rows.length) return;
+  [rows[index], rows[next]] = [rows[next], rows[index]];
+  rows.forEach((row, position) => { row.priority = position; });
+  renderRouteCard(window._routeCard);
+}
+
+function routeCardPeriodRemove(index) {
+  routeCardPeriodRows().splice(index, 1);
+  renderRouteCard(window._routeCard);
+}
+
+function routeCardPeriodPayload(state = window._routeCard) {
+  return routeCardPeriodRows(state).map((row, priority) => ({
+    name: row.name.trim(), start: row.start, end: row.end,
+    interval_min: +row.interval_min, travel_time_factor: +row.travel_time_factor,
+    transition_mode: row.transition_mode,
+    transition_window_min: +row.transition_window_min,
+    color: row.color, priority,
+  }));
+}
+
+async function routeCardPeriodSave() {
+  const state = window._routeCard; state.periodError = "";
+  try {
+    const saved = await api(`/api/routes/${state.routeId}/periods/${state.periodDay}`, {
+      method: "PUT", body: { items: routeCardPeriodPayload(state),
+        require_continuous: state.periodContinuous },
+    });
+    state.periodDrafts[state.periodDay] = saved.items.map(row => ({ ...row,
+      start: routePeriodTime(row.start_min), end: routePeriodTime(row.end_min) }));
+    state.periodCalcPreview = null; toast("Периоды движения сохранены");
+  } catch (error) { state.periodError = error.message; }
+  renderRouteCard(state);
+}
+
+async function routeCardTemplatePreview() {
+  const state = window._routeCard; state.periodError = "";
+  if (!state.periodTemplateId) { state.periodError = "Выберите шаблон"; renderRouteCard(state); return; }
+  try {
+    state.periodTemplatePreview = await api(
+      `/api/routes/${state.routeId}/periods/${state.periodDay}/template-preview`,
+      { method: "POST", body: { template_id: +state.periodTemplateId } },
+    );
+  } catch (error) { state.periodError = error.message; }
+  renderRouteCard(state);
+}
+
+function routeCardTemplateCancel() {
+  window._routeCard.periodTemplatePreview = null; renderRouteCard(window._routeCard);
+}
+
+async function routeCardTemplateApply() {
+  const state = window._routeCard;
+  try {
+    await api(`/api/routes/${state.routeId}/periods/${state.periodDay}/template-apply`, {
+      method: "POST", body: { preview_token: state.periodTemplatePreview.preview_token },
+    });
+    state.periodTemplatePreview = null; delete state.periodDrafts[state.periodDay];
+    toast("Шаблон применён"); await routeCardLoadPeriods();
+  } catch (error) { state.periodError = error.message; renderRouteCard(state); }
+}
+
+async function routeCardPeriodPreview() {
+  const state = window._routeCard; state.periodError = "";
+  try {
+    state.periodCalcPreview = await api(
+      `/api/routes/${state.routeId}/periods/${state.periodDay}/preview`,
+      { method: "POST", body: { terminal_layover_min: 6 } },
+    );
+  } catch (error) { state.periodError = error.message; }
+  renderRouteCard(state);
+}
+
+function routeCardPeriodTimeline(rows) {
+  if (!rows.length) return '<div class="route-empty">Добавьте хотя бы один период</div>';
+  const start = Math.min(...rows.map(row => routePeriodMinutes(row.start)));
+  const end = Math.max(...rows.map(row => routePeriodMinutes(row.end)));
+  const span = Math.max(1, end - start);
+  return `<div class="route-period-timeline">${rows.map(row => {
+    const width = Math.max(3, (routePeriodMinutes(row.end) - routePeriodMinutes(row.start)) / span * 100);
+    return `<div class="route-period-block" style="width:${width}%;background:${esc(row.color)}" title="${esc(row.name)}"><b>${esc(row.name)}</b><span>${esc(row.start)}–${esc(row.end)}</span></div>`;
+  }).join("")}</div>`;
+}
+
+function routeCardPeriodResult(state) {
+  const result = state.periodCalcPreview;
+  if (!result) return "";
+  const cards = result.periods.map(row => `<div class="card"><b>${esc(row.name)}</b><div class="num">${esc(row.buses_required)}</div><div class="lbl">автобусов · цикл ${esc(row.cycle_min)} мин · интервал ${esc(row.interval_min)} мин</div></div>`).join("");
+  const warnings = result.warnings.map(row => `<div class="vio w route-demand-jump"><b>Скачок потребности ${row.delta > 0 ? "+" : ""}${esc(row.delta)}</b>${esc(row.from)} → ${esc(row.to)}</div>`).join("");
+  return `<section class="panel"><h3>Расчётный предпросмотр</h3><p class="muted">Сохранённые рейсы не изменены.</p>
+    <div class="cards route-demand-grid"><div class="card"><div class="num">${esc(result.max_buses_required)}</div><div class="lbl">максимум автобусов</div></div>${cards}</div>
+    <div class="route-preview-times"><b>Отправления:</b> ${result.departures.map(row => esc(row.time)).join(", ")}</div>${warnings}</section>`;
+}
+
+function routeCardTemplateDiff(state) {
+  const preview = state.periodTemplatePreview;
+  if (!preview) return "";
+  const rows = (preview.diff.new || []).map(row => `<tr><td>${esc(row.name)}</td><td>${routePeriodTime(row.start_min)}</td><td>${routePeriodTime(row.end_min)}</td><td>${esc(row.interval_min)}</td></tr>`).join("");
+  return `<section class="panel"><h3>Предпросмотр шаблона — ещё не применён</h3><p class="muted">Было периодов: ${(preview.diff.old || []).length}; станет: ${(preview.diff.new || []).length}</p>
+    ${tbl(["Период", "Начало", "Конец", "Интервал"], rows)}<div class="foot"><button class="btn sec" onclick="routeCardTemplateCancel()">Отменить</button><button class="btn" onclick="routeCardTemplateApply()">Применить шаблон</button></div></section>`;
+}
+
+function routeCardPeriods(state) {
+  if (state.periodsLoading) return '<div class="route-empty">Загрузка периодов…</div>';
+  const rows = routeCardPeriodRows(state);
+  const editor = rows.map((row, index) => `<div class="route-period-row">
+    <input value="${esc(row.name)}" aria-label="Название периода" onchange="routeCardPeriodChange(${index},'name',this.value)">
+    <input type="time" value="${esc(row.start)}" onchange="routeCardPeriodChange(${index},'start',this.value)">
+    <input type="time" value="${esc(row.end)}" onchange="routeCardPeriodChange(${index},'end',this.value)">
+    <label>Интервал<input type="number" min="1" value="${esc(row.interval_min)}" onchange="routeCardPeriodChange(${index},'interval_min',this.value)"></label>
+    <label>Коэффициент<input type="number" min="0.25" max="4" step="0.05" value="${esc(row.travel_time_factor)}" onchange="routeCardPeriodChange(${index},'travel_time_factor',this.value)"></label>
+    <select onchange="routeCardPeriodChange(${index},'transition_mode',this.value)"><option value="abrupt" ${row.transition_mode === "abrupt" ? "selected" : ""}>Резко</option><option value="smooth" ${row.transition_mode === "smooth" ? "selected" : ""}>Плавно</option></select>
+    <label>Переход, мин<input type="number" min="0" value="${esc(row.transition_window_min)}" onchange="routeCardPeriodChange(${index},'transition_window_min',this.value)"></label>
+    <input type="color" value="${esc(row.color)}" onchange="routeCardPeriodChange(${index},'color',this.value)">
+    <div class="route-period-actions"><button class="btn small sec" onclick="routeCardPeriodMove(${index},-1)" ${index ? "" : "disabled"}>↑</button><button class="btn small sec" onclick="routeCardPeriodMove(${index},1)" ${index + 1 < rows.length ? "" : "disabled"}>↓</button><button class="btn small sec" onclick="routeCardPeriodDuplicate(${index})">Копия</button><button class="btn small danger" onclick="routeCardPeriodRemove(${index})">✕</button></div></div>`).join("");
+  const templateOptions = state.periodTemplates.map(item => `<option value="${item.id}" ${+state.periodTemplateId === item.id ? "selected" : ""}>${esc(item.name)}</option>`).join("");
+  return `<div class="route-card-toolbar"><label>Тип дня <select onchange="routeCardPeriodDay(this.value)"><option value="будни" ${state.periodDay === "будни" ? "selected" : ""}>Будни</option><option value="суббота" ${state.periodDay === "суббота" ? "selected" : ""}>Суббота</option><option value="воскресенье" ${state.periodDay === "воскресенье" ? "selected" : ""}>Воскресенье</option></select></label>
+    <label><input type="checkbox" ${state.periodContinuous ? "checked" : ""} onchange="window._routeCard.periodContinuous=this.checked"> Без разрывов</label><button class="btn sec" onclick="routeCardPeriodAdd()">+ Период</button><button class="btn" onclick="routeCardPeriodSave()">Сохранить все</button></div>
+    ${state.periodError ? `<div class="vio r"><b>Не удалось выполнить действие</b>${esc(state.periodError)}. Правки сохранены в форме.</div>` : ""}
+    <div class="route-period-grid">${editor || '<div class="route-empty">Периоды ещё не заданы</div>'}</div>${routeCardPeriodTimeline(rows)}
+    <section class="panel"><h3>Шаблоны и расчёт</h3><div class="route-template-actions"><select onchange="window._routeCard.periodTemplateId=this.value"><option value="">Выберите шаблон</option>${templateOptions}</select><button class="btn sec" onclick="routeCardTemplatePreview()">Предпросмотр шаблона</button><button class="btn" onclick="routeCardPeriodPreview()">Рассчитать расписание</button></div></section>
+    ${routeCardTemplateDiff(state)}${routeCardPeriodResult(state)}`;
+}
+
 function routeCardBody(state) {
   if (state.tab === "passport") return routeCardPassport(state);
   if (state.tab === "stops") return routeCardStops(state);
   if (state.tab === "map") return routeCardMap(state);
   if (state.tab === "segments") return routeCardSegments(state);
+  if (state.tab === "periods") return routeCardPeriods(state);
   return routeCardHistory(state);
 }
 

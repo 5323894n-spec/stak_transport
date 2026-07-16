@@ -213,14 +213,34 @@ label.f > * { display: block; width: 100%; margin-top: 3px; color: var(--text); 
 .route-diff .tbl-wrap { max-height: 330px; }
 .route-card .foot { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
 .route-card table input { width: 105px; }
+.route-period-grid { display: grid; gap: 8px; margin-bottom: 12px; }
+.route-period-row { display: grid; grid-template-columns: minmax(130px,1.3fr) 105px 105px 115px 125px 105px 125px 48px auto; gap: 8px; align-items: end; padding: 10px; border: 1px solid var(--line); border-radius: 9px; background: #fff; }
+.route-period-row label { display: grid; gap: 3px; color: var(--muted); font-size: 11px; }
+.route-period-row input, .route-period-row select { min-width: 0; width: 100%; }
+.route-period-row input[type="color"] { width: 48px; height: 36px; padding: 2px; }
+.route-period-actions, .route-template-actions { display: flex; flex-wrap: wrap; gap: 5px; align-items: center; }
+.route-period-timeline { display: flex; min-height: 62px; margin: 10px 0 14px; overflow: hidden; border: 1px solid var(--line); border-radius: 9px; background: #fff; }
+.route-period-block { display: flex; flex-direction: column; justify-content: center; min-width: 55px; padding: 8px; color: #fff; text-shadow: 0 1px 2px #0008; overflow: hidden; }
+.route-period-block span { font-size: 11px; white-space: nowrap; }
+.route-demand-grid { grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); }
+.route-demand-jump { margin-top: 8px; }
+.route-preview-times { margin: 12px 0; line-height: 1.8; }
+.schedule-preview-head { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; }
+.schedule-preview-head h3 { margin: 0 0 4px; }
+.schedule-preview-departures { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 12px; max-height: 150px; overflow: auto; }
+.schedule-preview-departures span { padding: 4px 7px; border-radius: 6px; background: #e8f1fb; color: #1e4f86; font-variant-numeric: tabular-nums; }
 @media (max-width: 900px) {
   .route-passport { grid-template-columns: 1fr; }
   .route-kpis { grid-template-columns: repeat(2, 1fr); }
   .route-stop-row { grid-template-columns: 36px 1fr; }
   .route-stop-coords, .route-stop-actions { grid-column: 2; }
   .route-card-toolbar { align-items: flex-start; flex-wrap: wrap; }
+  .route-period-row { grid-template-columns: 1fr 1fr; }
+  .route-period-actions { grid-column: 1 / -1; }
 }
 @media print {
   .route-tabs, .route-card-toolbar, .route-direction-switch, .route-stop-actions { display: none !important; }
   .route-card-head { padding: 8px; }
+  .route-period-actions, .route-template-actions { display: none !important; }
+  .route-period-row { break-inside: avoid; }
 }
