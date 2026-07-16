@@ -352,6 +352,46 @@ def schedule_problems(con, route_id, day_type):
                 f"\u0420\u0435\u0439\u0441 {t.get('trip_number')}: \u043d\u0435\u0432\u043e\u0437\u043c\u043e\u0436\u043d\u043e\u0435 \u0432\u0440\u0435\u043c\u044f \u043f\u0440\u0438\u0431\u044b\u0442\u0438\u044f",
                 t["output_number"], t["id"], t.get("trip_number"),
                 "\u041f\u0440\u043e\u0432\u0435\u0440\u044c\u0442\u0435 \u0432\u0440\u0435\u043c\u044f \u043e\u0442\u043f\u0440\u0430\u0432\u043b\u0435\u043d\u0438\u044f \u0438 \u043f\u0440\u0438\u0431\u044b\u0442\u0438\u044f."))
+        trace_direction = {
+            "прямое": "forward", "forward": "forward",
+            "обратное": "backward", "backward": "backward",
+        }.get(t.get("direction"))
+        expected_stops = 0
+        if trace_direction:
+            expected_stops = con.execute(
+                "SELECT COUNT(*) FROM route_stops WHERE route_id=? AND direction=?",
+                (route_id, trace_direction),
+            ).fetchone()[0]
+        stop_times = db.rows(con.execute(
+            "SELECT * FROM trip_stop_times WHERE trip_id=? ORDER BY sequence,id",
+            (t["id"],),
+        ))
+        if expected_stops and len(stop_times) != expected_stops:
+            problems.append(_problem(
+                "ошибка", "missing_stop_times",
+                f"Рейс {t.get('trip_number')}: заполнено остановок "
+                f"{len(stop_times)} из {expected_stops}",
+                t["output_number"], t["id"], t.get("trip_number"),
+                "Пересчитайте время рейса по остановкам."))
+        elif stop_times:
+            invalid = False
+            for index, row in enumerate(stop_times):
+                if int(row["departure_sec"]) < int(row["arrival_sec"]):
+                    invalid = True
+                    break
+                if index and int(row["arrival_sec"]) <= int(
+                    stop_times[index - 1]["departure_sec"]
+                ):
+                    invalid = True
+                    break
+            if invalid:
+                problems.append(_problem(
+                    "критично", "nonmonotonic_stop_times",
+                    f"Рейс {t.get('trip_number')}: нарушена последовательность "
+                    "времени по остановкам",
+                    t["output_number"], t["id"], t.get("trip_number"),
+                    "Исправьте контрольную точку или пересчитайте рейс."))
+
 
     for on, ts in by_out.items():
         seen_numbers = {}
