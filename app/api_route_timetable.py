@@ -5,6 +5,7 @@ import datetime
 
 import json
 import secrets
+import sqlite3
 from fastapi import APIRouter, Body, Depends, HTTPException
 
 from . import db
@@ -332,5 +333,122 @@ def schedule_generation_preview(
     except ValueError as exc:
         con.rollback()
         raise HTTPException(400, str(exc))
+    finally:
+        con.close()
+
+
+def _insert_generated_stop_times(con, trip_id, stop_times, timestamp):
+    for row in stop_times:
+        con.execute(
+            "INSERT INTO trip_stop_times(trip_id,route_stop_id,sequence,arrival_sec,"
+            "departure_sec,is_timing_point,is_manual_override,override_strategy,"
+            "override_reason,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                trip_id,
+                row["route_stop_id"],
+                row["sequence"],
+                row["arrival_sec"],
+                row["departure_sec"],
+                1 if row.get("is_timing_point") else 0,
+                0,
+                None,
+                None,
+                timestamp,
+                timestamp,
+            ),
+        )
+
+
+@router.post("/routes/{route_id}/schedule-generation/apply")
+def schedule_generation_apply(
+    route_id: int,
+    payload: dict = Body(...),
+    user=Depends(current_user),
+):
+    require_write(user, "trips")
+    day_type = str(payload.get("day_type") or "будни")
+    token = str(payload.get("preview_token") or "").strip()
+    if not token:
+        raise HTTPException(400, "Не указан токен предпросмотра")
+    con = db.connect()
+    try:
+        preview = con.execute(
+            "SELECT * FROM schedule_generation_previews WHERE token=? "
+            "AND route_id=? AND day_type=? AND username=?",
+            (token, route_id, day_type, user["username"]),
+        ).fetchone()
+        if not preview:
+            raise HTTPException(404, "Предпросмотр не найден")
+        preview = dict(preview)
+        if preview["applied_at"]:
+            raise HTTPException(409, "Предпросмотр уже применён")
+        if datetime.datetime.fromisoformat(preview["expires_at"]) < datetime.datetime.now():
+            raise HTTPException(410, "Срок предпросмотра истёк")
+        plan = json.loads(preview["payload_json"])
+        if (
+            plan.get("kind") != "stop_schedule_generation"
+            or int(plan.get("route_id")) != route_id
+            or plan.get("day_type") != day_type
+        ):
+            raise HTTPException(400, "Некорректный план генерации")
+
+        old_trip_count = con.execute(
+            "SELECT COUNT(*) FROM route_trips WHERE route_id=? AND day_type=?",
+            (route_id, day_type),
+        ).fetchone()[0]
+        con.execute(
+            "DELETE FROM route_trips WHERE route_id=? AND day_type=?",
+            (route_id, day_type),
+        )
+        timestamp = datetime.datetime.now().isoformat(timespec="seconds")
+        inserted = 0
+        for source in plan.get("trips") or []:
+            cursor = con.execute(
+                "INSERT INTO route_trips(route_id,day_type,output_number,shift_number,"
+                "trip_number,direction,dep_time,arr_time,distance_km,break_after_min,"
+                "break_type,period_id,source,generation_key) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    route_id,
+                    day_type,
+                    source["output_number"],
+                    source.get("shift_number", 1),
+                    source["trip_number"],
+                    source["direction"],
+                    source["dep_time"],
+                    source["arr_time"],
+                    source.get("distance_km", 0),
+                    source.get("break_after_min", 0),
+                    source.get("break_type", ""),
+                    source.get("period_id"),
+                    "period_generation",
+                    token,
+                ),
+            )
+            _insert_generated_stop_times(
+                con, cursor.lastrowid, source.get("stop_times") or [], timestamp
+            )
+            inserted += 1
+        updated = con.execute(
+            "UPDATE schedule_generation_previews SET applied_at=? "
+            "WHERE token=? AND applied_at IS NULL",
+            (timestamp, token),
+        )
+        if updated.rowcount != 1:
+            raise HTTPException(409, "Предпросмотр уже применён")
+        db.audit(
+            con,
+            user["username"],
+            "применение поостановочного расписания",
+            "routes",
+            route_id,
+            old={"day_type": day_type, "trips": old_trip_count},
+            new={"day_type": day_type, "trips": inserted, "generation_key": token},
+        )
+        con.commit()
+        return {"ok": True, "trips": inserted, "generation_key": token}
+    except (KeyError, TypeError, ValueError, sqlite3.IntegrityError) as exc:
+        con.rollback()
+        raise HTTPException(400, f"Не удалось применить расписание: {exc}")
     finally:
         con.close()
