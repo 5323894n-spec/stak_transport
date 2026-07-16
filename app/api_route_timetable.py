@@ -3,11 +3,16 @@
 
 import datetime
 
-from fastapi import APIRouter, Depends, HTTPException
+import json
+import secrets
+from fastapi import APIRouter, Body, Depends, HTTPException
 
 from . import db
 from .auth import current_user, require_write
-from .route_timetable import calculate_trip_stop_times, format_service_time
+from .route_periods import calculate_period_preview
+from .route_timetable import (
+    build_schedule_preview, calculate_trip_stop_times, format_service_time,
+)
 
 
 router = APIRouter(prefix="/api")
@@ -214,5 +219,118 @@ def stop_time_matrix(
                 }
             )
         return {"stops": stops, "trips": trips}
+    finally:
+        con.close()
+
+
+def _active_periods(con, route_id, day_type):
+    return db.rows(
+        con.execute(
+            "SELECT * FROM day_periods WHERE route_id=? AND day_type=? AND active=1 "
+            "ORDER BY start_min,priority,id",
+            (route_id, day_type),
+        )
+    )
+
+
+def _all_runtime_overrides(con, period_ids):
+    result = {period_id: {} for period_id in period_ids}
+    if not period_ids:
+        return result
+    placeholders = ",".join("?" for _ in period_ids)
+    for row in con.execute(
+        "SELECT period_id,route_stop_id,run_time_sec FROM route_stop_runtimes "
+        f"WHERE period_id IN ({placeholders})",
+        period_ids,
+    ):
+        result.setdefault(row["period_id"], {})[row["route_stop_id"]] = row["run_time_sec"]
+    return result
+
+
+@router.post("/routes/{route_id}/schedule-generation/preview")
+def schedule_generation_preview(
+    route_id: int,
+    payload: dict = Body(...),
+    user=Depends(current_user),
+):
+    require_write(user, "trips")
+    day_type = str(payload.get("day_type") or "будни")
+    con = db.connect()
+    try:
+        route = db.one(con.execute("SELECT * FROM routes WHERE id=?", (route_id,)))
+        if not route:
+            raise HTTPException(404, "Маршрут не найден")
+        periods = _active_periods(con, route_id, day_type)
+        if not periods:
+            raise HTTPException(400, "Для маршрута не заданы периоды движения")
+        forward_trace = _trace_rows(con, route_id, "forward")
+        backward_trace = _trace_rows(con, route_id, "backward")
+        if not forward_trace or not backward_trace:
+            raise HTTPException(400, "Для генерации нужны остановки обоих направлений")
+        forward_min = int(route.get("trip_time_min") or 0)
+        backward_min = int(route.get("trip_time_back_min") or 0)
+        if forward_min <= 0 or backward_min <= 0:
+            raise HTTPException(400, "Для маршрута не задано время движения")
+        outputs = int(payload.get("outputs") or route.get("outputs_count") or 1)
+        terminal_layover_min = int(payload.get("terminal_layover_min", 6))
+        interval_preview = calculate_period_preview(
+            periods,
+            forward_min=forward_min,
+            backward_min=backward_min,
+            terminal_layover_min=terminal_layover_min,
+        )
+        trips = build_schedule_preview(
+            departures=interval_preview["departures"],
+            periods=periods,
+            forward_trace=forward_trace,
+            backward_trace=backward_trace,
+            runtime_overrides=_all_runtime_overrides(
+                con, [period["id"] for period in periods]
+            ),
+            outputs=outputs,
+            terminal_layover_sec=terminal_layover_min * 60,
+        )
+        old_trip_count = con.execute(
+            "SELECT COUNT(*) FROM route_trips WHERE route_id=? AND day_type=?",
+            (route_id, day_type),
+        ).fetchone()[0]
+        old_stop_time_count = con.execute(
+            "SELECT COUNT(*) FROM trip_stop_times tst JOIN route_trips rt "
+            "ON rt.id=tst.trip_id WHERE rt.route_id=? AND rt.day_type=?",
+            (route_id, day_type),
+        ).fetchone()[0]
+        diff = {
+            "old_trip_count": old_trip_count,
+            "new_trip_count": len(trips),
+            "old_stop_time_count": old_stop_time_count,
+            "new_stop_time_count": sum(len(trip["stop_times"]) for trip in trips),
+        }
+        plan = {
+            "kind": "stop_schedule_generation",
+            "route_id": route_id,
+            "day_type": day_type,
+            "outputs": outputs,
+            "terminal_layover_min": terminal_layover_min,
+            "trips": trips,
+            "periods": interval_preview["periods"],
+            "warnings": interval_preview["warnings"],
+            "max_buses_required": interval_preview["max_buses_required"],
+            "diff": diff,
+        }
+        token = secrets.token_hex(16)
+        now = datetime.datetime.now()
+        expires = now + datetime.timedelta(minutes=30)
+        con.execute(
+            "INSERT INTO schedule_generation_previews(token,route_id,day_type,username,"
+            "payload_json,created_at,expires_at) VALUES(?,?,?,?,?,?,?)",
+            (token, route_id, day_type, user["username"],
+             json.dumps(plan, ensure_ascii=False), now.isoformat(timespec="seconds"),
+             expires.isoformat(timespec="seconds")),
+        )
+        con.commit()
+        return {"preview_token": token, "expires_at": expires.isoformat(timespec="seconds"), **plan}
+    except ValueError as exc:
+        con.rollback()
+        raise HTTPException(400, str(exc))
     finally:
         con.close()
