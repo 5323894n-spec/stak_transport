@@ -7,6 +7,10 @@ import json
 import secrets
 import sqlite3
 from fastapi import APIRouter, Body, Depends, HTTPException
+from openpyxl import Workbook
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+from openpyxl.utils import get_column_letter
+
 
 from . import db
 from .auth import current_user, require_write
@@ -15,6 +19,7 @@ from .route_timetable import (
     adjust_stop_times, build_schedule_preview, calculate_trip_stop_times,
     format_service_time,
 )
+from .xl import _xlsx_download_response
 
 
 router = APIRouter(prefix="/api")
@@ -554,5 +559,226 @@ def schedule_generation_apply(
     except (KeyError, TypeError, ValueError, sqlite3.IntegrityError) as exc:
         con.rollback()
         raise HTTPException(400, f"Не удалось применить расписание: {exc}")
+    finally:
+        con.close()
+
+EXPORT_DARK = "17365D"
+EXPORT_BLUE = "DDEBF7"
+EXPORT_ALT = "F5F8FC"
+EXPORT_MANUAL = "FFF2CC"
+
+
+def _prepare_timetable_sheet(ws, *, title, metadata, headers, widths,
+                             landscape=False, freeze="A4"):
+    """Apply the common print-ready timetable style."""
+    last_column = max(1, len(headers))
+    ws.title = "Расписание"
+    ws.sheet_view.showGridLines = False
+    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=last_column)
+    ws.cell(1, 1, title)
+    ws.cell(1, 1).font = Font(name="Calibri", size=15, bold=True, color="FFFFFF")
+    ws.cell(1, 1).fill = PatternFill("solid", fgColor=EXPORT_DARK)
+    ws.cell(1, 1).alignment = Alignment(horizontal="center", vertical="center")
+    ws.row_dimensions[1].height = 27
+    ws.merge_cells(start_row=2, start_column=1, end_row=2, end_column=last_column)
+    ws.cell(2, 1, metadata)
+    ws.cell(2, 1).font = Font(italic=True, color="44546A")
+    ws.cell(2, 1).alignment = Alignment(horizontal="left", vertical="center")
+    ws.row_dimensions[2].height = 22
+    thin = Side(style="thin", color="B4C6E7")
+    for column, header in enumerate(headers, 1):
+        cell = ws.cell(3, column, header)
+        cell.font = Font(bold=True, color="FFFFFF")
+        cell.fill = PatternFill("solid", fgColor=EXPORT_DARK)
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        cell.border = Border(bottom=thin, right=thin)
+        ws.column_dimensions[get_column_letter(column)].width = widths[column - 1]
+    ws.row_dimensions[3].height = 34
+    ws.freeze_panes = freeze
+    ws.auto_filter.ref = f"A3:{get_column_letter(last_column)}{max(3, ws.max_row)}"
+    ws.print_title_rows = "1:3"
+    ws.page_setup.orientation = "landscape" if landscape else "portrait"
+    ws.page_setup.paperSize = ws.PAPERSIZE_A4
+    ws.page_setup.fitToWidth = 1
+    ws.page_setup.fitToHeight = 0
+    ws.sheet_properties.pageSetUpPr.fitToPage = True
+    ws.page_margins.left = 0.25
+    ws.page_margins.right = 0.25
+    ws.page_margins.top = 0.4
+    ws.page_margins.bottom = 0.4
+
+
+def _finish_timetable_sheet(ws):
+    thin = Side(style="thin", color="D9E2F3")
+    for row_index, row in enumerate(ws.iter_rows(min_row=4), 4):
+        fill = PatternFill("solid", fgColor=EXPORT_ALT) if row_index % 2 == 0 else None
+        for cell in row:
+            cell.border = Border(bottom=thin)
+            cell.alignment = Alignment(
+                horizontal="left" if cell.column == 1 else "center",
+                vertical="center", wrap_text=True,
+            )
+            if fill:
+                cell.fill = fill
+        ws.row_dimensions[row_index].height = 24
+    ws.print_area = f"A1:{get_column_letter(ws.max_column)}{ws.max_row}"
+    ws.auto_filter.ref = f"A3:{get_column_letter(ws.max_column)}{ws.max_row}"
+
+
+def _trip_direction_key(direction):
+    return DIRECTION_TO_TRACE.get(direction, direction)
+
+
+@router.get("/routes/{route_id}/stop-times/export.xlsx")
+def route_stop_times_export(
+    route_id: int, day_type: str, direction: str = "", output_number: int = 0,
+    user=Depends(current_user),
+):
+    con = db.connect()
+    try:
+        route = db.one(con.execute("SELECT * FROM routes WHERE id=?", (route_id,)))
+        if not route:
+            raise HTTPException(404, "Маршрут не найден")
+        query = "SELECT * FROM route_trips WHERE route_id=? AND day_type=?"
+        args = [route_id, day_type]
+        if direction:
+            query += " AND direction=?"
+            args.append(direction)
+        if output_number:
+            query += " AND output_number=?"
+            args.append(output_number)
+        query += " ORDER BY output_number,dep_time,trip_number,id"
+        trips = db.rows(con.execute(query, args))
+        headers = ["Остановка"] + [
+            f"Вых. {trip['output_number']} · рейс {trip['trip_number']}\n"
+            f"{trip['dep_time']}–{trip['arr_time']}" for trip in trips
+        ]
+        wb = Workbook()
+        ws = wb.active
+        _prepare_timetable_sheet(
+            ws,
+            title=f"Поостановочное расписание маршрута № {route['number']}",
+            metadata=f"{route.get('name') or ''} · тип дня: {day_type}",
+            headers=headers,
+            widths=[34] + [16] * len(trips),
+            landscape=True,
+            freeze="B4",
+        )
+        time_maps = {
+            trip["id"]: {
+                row["route_stop_id"]: row
+                for row in db.rows(con.execute(
+                    "SELECT * FROM trip_stop_times WHERE trip_id=?", (trip["id"],)
+                ))
+            } for trip in trips
+        }
+        for trace_direction, label in (("forward", "Прямое"), ("backward", "Обратное")):
+            stops = _trace_rows(con, route_id, trace_direction)
+            for stop in stops:
+                values = [f"{label} · {stop['sequence']}. {stop['stop_name']}"]
+                manual_columns = []
+                for column, trip in enumerate(trips, 2):
+                    row = time_maps[trip["id"]].get(stop["id"])
+                    if not row or _trip_direction_key(trip["direction"]) != trace_direction:
+                        values.append("")
+                        continue
+                    arrival = format_service_time(row["arrival_sec"])
+                    departure = format_service_time(row["departure_sec"])
+                    values.append(arrival if arrival == departure else f"{arrival} / {departure}")
+                    if row["is_manual_override"]:
+                        manual_columns.append(column)
+                ws.append(values)
+                for column in manual_columns:
+                    ws.cell(ws.max_row, column).fill = PatternFill("solid", fgColor=EXPORT_MANUAL)
+        _finish_timetable_sheet(ws)
+        return _xlsx_download_response(
+            wb, f"route_{route['number']}_{day_type}_stop_times.xlsx"
+        )
+    finally:
+        con.close()
+
+
+@router.get("/trips/{trip_id}/stop-times/export.xlsx")
+def trip_stop_times_export(trip_id: int, user=Depends(current_user)):
+    con = db.connect()
+    try:
+        trip = db.one(con.execute(
+            "SELECT rt.*,r.number AS route_number,r.name AS route_name "
+            "FROM route_trips rt JOIN routes r ON r.id=rt.route_id WHERE rt.id=?",
+            (trip_id,),
+        ))
+        if not trip:
+            raise HTTPException(404, "Рейс не найден")
+        rows = db.rows(con.execute(
+            "SELECT tst.*,s.name AS stop_name FROM trip_stop_times tst "
+            "JOIN route_stops rs ON rs.id=tst.route_stop_id "
+            "JOIN stops s ON s.id=rs.stop_id WHERE tst.trip_id=? "
+            "ORDER BY tst.sequence,tst.id",
+            (trip_id,),
+        ))
+        wb = Workbook()
+        ws = wb.active
+        _prepare_timetable_sheet(
+            ws,
+            title=f"Лист рейса № {trip['trip_number']} · маршрут № {trip['route_number']}",
+            metadata=(f"{trip.get('route_name') or ''} · {trip['day_type']} · "
+                      f"выход {trip['output_number']} · {trip['dep_time']}–{trip['arr_time']}"),
+            headers=["№", "Остановка", "Прибытие", "Отправление", "Ручная корректировка"],
+            widths=[7, 38, 15, 15, 32],
+        )
+        for row in rows:
+            ws.append([
+                row["sequence"], row["stop_name"],
+                format_service_time(row["arrival_sec"]),
+                format_service_time(row["departure_sec"]),
+                row.get("override_reason") or "",
+            ])
+            if row["is_manual_override"]:
+                for cell in ws[ws.max_row]:
+                    cell.fill = PatternFill("solid", fgColor=EXPORT_MANUAL)
+        _finish_timetable_sheet(ws)
+        return _xlsx_download_response(wb, f"trip_{trip_id}_stop_times.xlsx")
+    finally:
+        con.close()
+
+
+@router.get("/stops/{stop_id}/timetable.xlsx")
+def stop_pavilion_timetable_export(
+    stop_id: int, day_type: str, user=Depends(current_user),
+):
+    con = db.connect()
+    try:
+        stop = db.one(con.execute("SELECT * FROM stops WHERE id=?", (stop_id,)))
+        if not stop:
+            raise HTTPException(404, "Остановка не найдена")
+        rows = db.rows(con.execute(
+            "SELECT r.number AS route_number,r.name AS route_name,rt.direction,"
+            "rt.output_number,rt.trip_number,tst.arrival_sec,tst.departure_sec "
+            "FROM trip_stop_times tst "
+            "JOIN route_stops rs ON rs.id=tst.route_stop_id "
+            "JOIN route_trips rt ON rt.id=tst.trip_id "
+            "JOIN routes r ON r.id=rt.route_id "
+            "WHERE rs.stop_id=? AND rt.day_type=? "
+            "ORDER BY tst.departure_sec,r.number,rt.output_number,rt.trip_number",
+            (stop_id, day_type),
+        ))
+        wb = Workbook()
+        ws = wb.active
+        _prepare_timetable_sheet(
+            ws,
+            title=f"Расписание остановки «{stop['name']}»",
+            metadata=f"Тип дня: {day_type} · отправлений: {len(rows)}",
+            headers=["Время", "Маршрут", "Направление", "Выход", "Рейс", "Прибытие"],
+            widths=[14, 22, 22, 10, 10, 14],
+        )
+        for row in rows:
+            ws.append([
+                format_service_time(row["departure_sec"]),
+                f"№ {row['route_number']} · {row.get('route_name') or ''}",
+                row["direction"], row["output_number"], row["trip_number"],
+                format_service_time(row["arrival_sec"]),
+            ])
+        _finish_timetable_sheet(ws)
+        return _xlsx_download_response(wb, f"stop_{stop_id}_{day_type}.xlsx")
     finally:
         con.close()
