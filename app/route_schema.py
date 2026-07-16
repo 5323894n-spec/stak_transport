@@ -172,6 +172,72 @@ CREATE TABLE IF NOT EXISTS schedule_generation_previews(
 );
 CREATE INDEX IF NOT EXISTS idx_schedule_generation_preview_scope
   ON schedule_generation_previews(route_id,day_type,username,created_at);
+
+CREATE TABLE IF NOT EXISTS shift_types(
+  id INTEGER PRIMARY KEY,
+  code TEXT NOT NULL UNIQUE,
+  name TEXT NOT NULL,
+  work_pattern TEXT NOT NULL DEFAULT 'custom',
+  planned_duration_min INTEGER NOT NULL CHECK(planned_duration_min > 0),
+  max_duration_min INTEGER NOT NULL CHECK(max_duration_min >= planned_duration_min),
+  driver_slots INTEGER NOT NULL DEFAULT 1 CHECK(driver_slots IN (1,2)),
+  allow_split INTEGER NOT NULL DEFAULT 0,
+  color TEXT NOT NULL DEFAULT '#2563eb',
+  active INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS route_shift_settings(
+  id INTEGER PRIMARY KEY,
+  route_id INTEGER NOT NULL REFERENCES routes(id) ON DELETE CASCADE,
+  day_type TEXT NOT NULL,
+  default_shift_type_id INTEGER NOT NULL REFERENCES shift_types(id),
+  long_shift_type_id INTEGER REFERENCES shift_types(id),
+  handover_min INTEGER NOT NULL DEFAULT 10 CHECK(handover_min >= 0),
+  long_run_threshold_min INTEGER NOT NULL DEFAULT 720
+    CHECK(long_run_threshold_min > 0),
+  auto_split INTEGER NOT NULL DEFAULT 1,
+  updated_at TEXT NOT NULL,
+  UNIQUE(route_id,day_type)
+);
+
+CREATE TABLE IF NOT EXISTS output_shifts(
+  id INTEGER PRIMARY KEY,
+  route_id INTEGER NOT NULL REFERENCES routes(id) ON DELETE CASCADE,
+  day_type TEXT NOT NULL,
+  output_number INTEGER NOT NULL,
+  shift_number INTEGER NOT NULL,
+  shift_type_id INTEGER NOT NULL REFERENCES shift_types(id),
+  trip_from_id INTEGER NOT NULL REFERENCES route_trips(id) ON DELETE CASCADE,
+  trip_to_id INTEGER NOT NULL REFERENCES route_trips(id) ON DELETE CASCADE,
+  start_sec INTEGER NOT NULL,
+  end_sec INTEGER NOT NULL CHECK(end_sec > start_sec),
+  driver_slots INTEGER NOT NULL DEFAULT 1 CHECK(driver_slots IN (1,2)),
+  handover_after_min INTEGER NOT NULL DEFAULT 0,
+  source TEXT NOT NULL DEFAULT 'generated',
+  is_manual_locked INTEGER NOT NULL DEFAULT 0,
+  manual_reason TEXT,
+  generation_key TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE(route_id,day_type,output_number,shift_number)
+);
+CREATE INDEX IF NOT EXISTS idx_output_shifts_scope
+  ON output_shifts(route_id,day_type,output_number,shift_number);
+
+CREATE TABLE IF NOT EXISTS shift_generation_previews(
+  token TEXT PRIMARY KEY,
+  route_id INTEGER NOT NULL REFERENCES routes(id) ON DELETE CASCADE,
+  day_type TEXT NOT NULL,
+  username TEXT NOT NULL,
+  payload_json TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  applied_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_shift_generation_preview_scope
+  ON shift_generation_previews(route_id,day_type,username,created_at);
 """
 
 
@@ -190,3 +256,29 @@ def migrate_route_network(con):
         con, "route_trips", "source", "TEXT NOT NULL DEFAULT 'manual'"
     )
     _add_column(con, "route_trips", "generation_key", "TEXT")
+    _add_column(
+        con,
+        "route_trips",
+        "output_shift_id",
+        "INTEGER REFERENCES output_shifts(id)",
+    )
+    _add_column(
+        con,
+        "roster_assignments",
+        "output_shift_id",
+        "INTEGER REFERENCES output_shifts(id)",
+    )
+    con.executemany(
+        """
+        INSERT OR IGNORE INTO shift_types(
+          code, name, work_pattern, planned_duration_min, max_duration_min,
+          driver_slots, allow_split, color, active, created_at, updated_at
+        ) VALUES(?,?,?,?,?,?,?,?,1,datetime('now'),datetime('now'))
+        """,
+        [
+            ("single_8h", "Одиночная 8 ч", "single", 480, 600, 1, 0, "#2563eb"),
+            ("single_12h", "Одиночная 12 ч", "single", 720, 780, 1, 0, "#7c3aed"),
+            ("split", "Разрывная", "split", 480, 600, 1, 1, "#ea580c"),
+            ("two_driver_long", "Два водителя", "two_driver", 900, 1080, 2, 0, "#059669"),
+        ],
+    )
