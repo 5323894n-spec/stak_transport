@@ -4,6 +4,13 @@
 import heapq
 import math
 
+VALID_ADJUSTMENT_STRATEGIES = {
+    "selected_only",
+    "shift_following",
+    "redistribute_remaining",
+}
+
+
 
 def format_service_time(seconds):
     """Format service-day seconds without wrapping values after midnight."""
@@ -64,6 +71,71 @@ def calculate_trip_stop_times(
             }
         )
     return result
+
+
+def validate_stop_times(rows, minimum_run_sec=1):
+    """Validate dwell and chronological order of a stop-time matrix."""
+    if not rows:
+        raise ValueError("В рейсе нет поостановочного расписания")
+    minimum_run_sec = int(minimum_run_sec)
+    for index, row in enumerate(rows):
+        if int(row["departure_sec"]) < int(row["arrival_sec"]):
+            raise ValueError("Отправление не может быть раньше прибытия")
+        if index and int(row["arrival_sec"]) < (
+            int(rows[index - 1]["departure_sec"]) + minimum_run_sec
+        ):
+            raise ValueError("Нарушена последовательность времени по остановкам")
+    return rows
+
+
+def adjust_stop_times(rows, *, route_stop_id, departure_sec, strategy):
+    """Apply one controlled manual correction to copied stop-time rows."""
+    if strategy not in VALID_ADJUSTMENT_STRATEGIES:
+        raise ValueError("Неизвестная стратегия корректировки")
+    adjusted = [dict(row) for row in rows]
+    try:
+        selected_index = next(
+            index for index, row in enumerate(adjusted)
+            if int(row["route_stop_id"]) == int(route_stop_id)
+        )
+    except StopIteration:
+        raise ValueError("Остановка не найдена в рейсе")
+    selected = adjusted[selected_index]
+    old_departure = int(selected["departure_sec"])
+    new_departure = int(departure_sec)
+    dwell = old_departure - int(selected["arrival_sec"])
+    delta = new_departure - old_departure
+    if strategy == "selected_only":
+        selected["arrival_sec"] = new_departure - dwell
+        selected["departure_sec"] = new_departure
+    elif strategy == "shift_following":
+        for index in range(selected_index, len(adjusted)):
+            adjusted[index]["arrival_sec"] = int(rows[index]["arrival_sec"]) + delta
+            adjusted[index]["departure_sec"] = int(rows[index]["departure_sec"]) + delta
+    else:
+        final_arrival = int(rows[-1]["arrival_sec"])
+        old_span = final_arrival - old_departure
+        new_span = final_arrival - new_departure
+        if selected_index == len(adjusted) - 1:
+            selected["arrival_sec"] = new_departure - dwell
+            selected["departure_sec"] = new_departure
+        else:
+            if old_span <= 0 or new_span <= len(adjusted) - selected_index - 1:
+                raise ValueError("Оставшегося времени недостаточно для перераспределения")
+            selected["arrival_sec"] = new_departure - dwell
+            selected["departure_sec"] = new_departure
+            for index in range(selected_index + 1, len(adjusted)):
+                old_row = rows[index]
+                ratio = (int(old_row["arrival_sec"]) - old_departure) / old_span
+                arrival = round(new_departure + ratio * new_span)
+                row_dwell = int(old_row["departure_sec"]) - int(old_row["arrival_sec"])
+                adjusted[index]["arrival_sec"] = arrival
+                adjusted[index]["departure_sec"] = arrival + row_dwell
+    selected = adjusted[selected_index]
+    selected["is_manual_override"] = 1
+    selected["override_strategy"] = strategy
+    validate_stop_times(adjusted)
+    return adjusted
 
 
 def _period_at(periods, departure_sec):

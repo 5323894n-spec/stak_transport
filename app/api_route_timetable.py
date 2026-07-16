@@ -12,7 +12,8 @@ from . import db
 from .auth import current_user, require_write
 from .route_periods import calculate_period_preview
 from .route_timetable import (
-    build_schedule_preview, calculate_trip_stop_times, format_service_time,
+    adjust_stop_times, build_schedule_preview, calculate_trip_stop_times,
+    format_service_time,
 )
 
 
@@ -143,6 +144,109 @@ def _serialized_time_row(row):
         "is_timing_point": bool(row["is_timing_point"]),
         "is_manual_override": bool(row["is_manual_override"]),
     }
+
+
+def _trip_time_rows(con, trip_id):
+    return db.rows(con.execute(
+        "SELECT * FROM trip_stop_times WHERE trip_id=? ORDER BY sequence,id",
+        (trip_id,),
+    ))
+
+
+@router.patch("/trips/{trip_id}/stop-times/{route_stop_id}")
+def trip_stop_time_adjust(
+    trip_id: int, route_stop_id: int, payload: dict = Body(...),
+    user=Depends(current_user),
+):
+    require_write(user, "trips")
+    reason = str(payload.get("reason") or "").strip()
+    if not reason:
+        raise HTTPException(400, "Укажите причину ручной корректировки")
+    strategy = str(payload.get("strategy") or "selected_only").strip()
+    con = db.connect()
+    try:
+        trip = db.one(con.execute("SELECT * FROM route_trips WHERE id=?", (trip_id,)))
+        if not trip:
+            raise HTTPException(404, "Рейс не найден")
+        rows = _trip_time_rows(con, trip_id)
+        if not rows:
+            raise HTTPException(400, "Сначала рассчитайте время по остановкам")
+        departure_sec = service_time_to_seconds(payload.get("departure_time"))
+        if departure_sec + 12 * 3600 < int(rows[0]["arrival_sec"]):
+            departure_sec += 24 * 3600
+        adjusted = adjust_stop_times(
+            rows, route_stop_id=route_stop_id,
+            departure_sec=departure_sec, strategy=strategy,
+        )
+        timestamp = datetime.datetime.now().isoformat(timespec="seconds")
+        for row in adjusted:
+            selected = int(row["route_stop_id"]) == route_stop_id
+            con.execute(
+                "UPDATE trip_stop_times SET arrival_sec=?,departure_sec=?,"
+                "is_manual_override=?,override_strategy=?,override_reason=?,updated_at=? "
+                "WHERE id=?",
+                (row["arrival_sec"], row["departure_sec"],
+                 1 if selected else row.get("is_manual_override", 0),
+                 strategy if selected else row.get("override_strategy"),
+                 reason if selected else row.get("override_reason"),
+                 timestamp, row["id"]),
+            )
+        con.execute(
+            "UPDATE route_trips SET dep_time=?,arr_time=? WHERE id=?",
+            (format_service_time(adjusted[0]["departure_sec"]),
+             format_service_time(adjusted[-1]["arrival_sec"]), trip_id),
+        )
+        db.audit(
+            con, user["username"], "ручная корректировка времени остановки",
+            "route_trips", trip_id,
+            old={"route_stop_id": route_stop_id, "rows": rows},
+            new={"route_stop_id": route_stop_id, "strategy": strategy,
+                 "reason": reason, "rows": adjusted},
+        )
+        con.commit()
+        return {"ok": True, "items": [_serialized_time_row(row) for row in adjusted]}
+    except ValueError as exc:
+        con.rollback()
+        raise HTTPException(400, str(exc))
+    finally:
+        con.close()
+
+
+@router.post("/routes/{route_id}/stop-times/reset-manual")
+def route_stop_times_reset_manual(
+    route_id: int, payload: dict = Body(...), user=Depends(current_user),
+):
+    require_write(user, "trips")
+    day_type = str(payload.get("day_type") or "").strip()
+    if not day_type:
+        raise HTTPException(400, "Не указан тип дня")
+    con = db.connect()
+    try:
+        query = "SELECT id FROM route_trips WHERE route_id=? AND day_type=?"
+        args = [route_id, day_type]
+        if payload.get("trip_id") is not None:
+            query += " AND id=?"
+            args.append(int(payload["trip_id"]))
+        if payload.get("output_number") is not None:
+            query += " AND output_number=?"
+            args.append(int(payload["output_number"]))
+        trip_ids = [row[0] for row in con.execute(query, args)]
+        for selected_trip_id in trip_ids:
+            recalculate_trip_stop_times_in_connection(
+                con, selected_trip_id, preserve_manual=False
+            )
+        db.audit(
+            con, user["username"], "сброс ручных корректировок времени",
+            "routes", route_id,
+            new={"day_type": day_type, "trips": len(trip_ids)},
+        )
+        con.commit()
+        return {"ok": True, "updated": len(trip_ids)}
+    except (TypeError, ValueError) as exc:
+        con.rollback()
+        raise HTTPException(400, str(exc))
+    finally:
+        con.close()
 
 
 @router.post("/trips/{trip_id}/stop-times/recalculate")
