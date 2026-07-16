@@ -138,6 +138,14 @@ def trip_save(payload: dict = Body(...), user=Depends(current_user)):
             trip_id = cur.lastrowid
             db.audit(con, user["username"], "создание рейса", "route_trips", trip_id, new=payload)
         shifted = _shift_following_trips_after_break(con, trip_id)
+        has_stop_times = con.execute(
+            "SELECT 1 FROM trip_stop_times WHERE trip_id=? LIMIT 1", (trip_id,)
+        ).fetchone()
+        if has_stop_times:
+            from .api_route_timetable import recalculate_trip_stop_times_in_connection
+            recalculate_trip_stop_times_in_connection(
+                con, trip_id, preserve_manual=True
+            )
         con.commit()
         return {"ok": True, "id": trip_id, "shifted": shifted}
     finally:
