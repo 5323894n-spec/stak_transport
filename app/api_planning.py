@@ -374,6 +374,15 @@ def schedule_problems(con, route_id, day_type):
                 t["output_number"], t["id"], t.get("trip_number"),
                 "Пересчитайте время рейса по остановкам."))
         elif stop_times:
+            sequences = [int(row["sequence"]) for row in stop_times]
+            if sequences != list(range(1, len(stop_times) + 1)):
+                problems.append(_problem(
+                    "ошибка", "invalid_stop_sequence",
+                    f"Рейс {t.get('trip_number')}: нарушена нумерация остановок "
+                    f"({', '.join(map(str, sequences))})",
+                    t["output_number"], t["id"], t.get("trip_number"),
+                    "Пересчитайте поостановочное расписание рейса."))
+
             invalid = False
             for index, row in enumerate(stop_times):
                 if int(row["departure_sec"]) < int(row["arrival_sec"]):
@@ -391,6 +400,22 @@ def schedule_problems(con, route_id, day_type):
                     "времени по остановкам",
                     t["output_number"], t["id"], t.get("trip_number"),
                     "Исправьте контрольную точку или пересчитайте рейс."))
+
+            if t.get("dep_time") and t.get("arr_time"):
+                first_difference = abs(
+                    int(stop_times[0]["departure_sec"]) - N.tmin(t["dep_time"]) * 60
+                )
+                last_difference = abs(
+                    int(stop_times[-1]["arrival_sec"]) - N.tmin(t["arr_time"]) * 60
+                )
+                if first_difference > 59 or last_difference > 59:
+                    problems.append(_problem(
+                        "ошибка", "stop_time_boundary_mismatch",
+                        f"Рейс {t.get('trip_number')}: границы поостановочного "
+                        "расписания не совпадают с временем рейса",
+                        t["output_number"], t["id"], t.get("trip_number"),
+                        "Пересчитайте рейс или исправьте время контрольной точки "
+                        "с переносом последующих остановок."))
 
 
     for on, ts in by_out.items():

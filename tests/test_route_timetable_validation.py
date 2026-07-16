@@ -83,3 +83,48 @@ def test_route_check_reports_nonmonotonic_stop_times(checked_route):
         and item["severity"] == "критично"
         for item in problems
     )
+
+
+def test_route_check_reports_stop_sequence_gaps(checked_route):
+    import app.db as db
+
+    client, route_id, trip_id = checked_route
+    assert client.post(f"/api/trips/{trip_id}/stop-times/recalculate").status_code == 200
+    con = db.connect()
+    try:
+        con.execute(
+            "UPDATE trip_stop_times SET sequence=3 WHERE trip_id=? AND sequence=2",
+            (trip_id,),
+        )
+        con.commit()
+    finally:
+        con.close()
+    problems = client.get(
+        f"/api/routes/{route_id}/check?day_type=будни"
+    ).json()["problems"]
+    assert any(item["kind"] == "invalid_stop_sequence" for item in problems)
+
+
+def test_route_check_reports_trip_boundary_mismatch(checked_route):
+    import app.db as db
+
+    client, route_id, trip_id = checked_route
+    assert client.post(f"/api/trips/{trip_id}/stop-times/recalculate").status_code == 200
+    con = db.connect()
+    try:
+        con.execute(
+            "UPDATE trip_stop_times SET arrival_sec=arrival_sec+120,"
+            "departure_sec=departure_sec+120 WHERE trip_id=? AND sequence=1",
+            (trip_id,),
+        )
+        con.commit()
+    finally:
+        con.close()
+    problems = client.get(
+        f"/api/routes/{route_id}/check?day_type=будни"
+    ).json()["problems"]
+    assert any(
+        item["kind"] == "stop_time_boundary_mismatch"
+        and item["severity"] == "ошибка"
+        for item in problems
+    )
