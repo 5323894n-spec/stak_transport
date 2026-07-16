@@ -244,3 +244,49 @@ label.f > * { display: block; width: 100%; margin-top: 3px; color: var(--text); 
   .route-period-actions, .route-template-actions { display: none !important; }
   .route-period-row { break-inside: avoid; }
 }
+
+.schedule-generation-diff { border-color: #93c5fd; background: #f8fbff; }
+.schedule-generation-diff .cards { margin-top: 12px; }
+.schedule-matrix-filters { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 12px; }
+.schedule-stop-matrix {
+  max-width: 100%; overflow: auto; max-height: 68vh;
+  border: 1px solid var(--line); border-radius: 8px; margin-bottom: 16px;
+}
+.schedule-stop-matrix table { border-collapse: separate; border-spacing: 0; min-width: 100%; background: #fff; }
+.schedule-stop-matrix th, .schedule-stop-matrix td {
+  min-width: 118px; padding: 7px 9px; border-right: 1px solid var(--line);
+  border-bottom: 1px solid var(--line); text-align: center; white-space: nowrap;
+}
+.schedule-stop-matrix thead th {
+  position: sticky; top: 0; z-index: 4; background: #eef3f9;
+  box-shadow: 0 1px 0 var(--line);
+}
+.schedule-stop-matrix .schedule-stop-name {
+  position: sticky; left: 0; z-index: 3; min-width: 190px; max-width: 260px;
+  text-align: left; white-space: normal; background: #f8fafc;
+}
+.schedule-stop-matrix thead .schedule-stop-name { z-index: 6; background: #e7edf5; }
+.schedule-stop-cell { cursor: pointer; line-height: 1.25; }
+.schedule-stop-cell:hover { background: #eff6ff; }
+.schedule-stop-cell span, .schedule-stop-cell b { display: block; }
+.schedule-stop-cell span { color: var(--muted); font-size: 11px; }
+.schedule-stop-cell i { display: inline-block; margin-top: 3px; color: #92400e; font-size: 10px; }
+.schedule-stop-time-manual { background: #fff7d6; box-shadow: inset 3px 0 #d97706; }
+.schedule-stop-time-manual:hover { background: #ffefb0; }
+
+@media (max-width: 760px) {
+  .schedule-stop-matrix { max-height: 60vh; }
+  .schedule-stop-matrix th, .schedule-stop-matrix td { min-width: 100px; padding: 6px; }
+  .schedule-stop-matrix .schedule-stop-name { min-width: 145px; max-width: 175px; }
+  .schedule-matrix-filters > * { flex: 1 1 145px; }
+}
+
+@media print {
+  .schedule-matrix-filters, .schedule-stop-matrix .btn { display: none !important; }
+  .schedule-stop-matrix { overflow: visible; max-height: none; border: 0; }
+  .schedule-stop-matrix table { font-size: 9pt; }
+  .schedule-stop-matrix thead th, .schedule-stop-matrix .schedule-stop-name {
+    position: static; box-shadow: none;
+  }
+  .schedule-stop-time-manual { background: #fff !important; box-shadow: inset 2px 0 #555; }
+}
