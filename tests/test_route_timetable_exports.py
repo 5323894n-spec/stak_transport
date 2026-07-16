@@ -98,3 +98,32 @@ def test_stop_pavilion_export_lists_all_departures(exported_schedule):
     assert sheet["A1"].value.startswith("Расписание остановки")
     assert sheet.max_row > 3
     assert "Маршрут" in [cell.value for cell in sheet[3]]
+
+
+def test_trip_export_preserves_manual_adjustment_fill(exported_schedule):
+    import app.db as db
+
+    client, _, _, trip_id = exported_schedule
+    con = db.connect()
+    try:
+        route_stop_id = con.execute(
+            "SELECT route_stop_id FROM trip_stop_times WHERE trip_id=? "
+            "ORDER BY sequence LIMIT 1",
+            (trip_id,),
+        ).fetchone()[0]
+    finally:
+        con.close()
+    response = client.patch(
+        f"/api/trips/{trip_id}/stop-times/{route_stop_id}",
+        json={
+            "departure_time": "06:01",
+            "strategy": "shift_following",
+            "reason": "Проверка отметки Excel",
+        },
+    )
+    assert response.status_code == 200, response.text
+    response = client.get(f"/api/trips/{trip_id}/stop-times/export.xlsx")
+    assert response.status_code == 200, response.text
+    sheet = load_workbook(io.BytesIO(response.content)).active
+    color = sheet["A4"].fill.fgColor.rgb
+    assert color in ("00FFF2CC", "FFF2CC")

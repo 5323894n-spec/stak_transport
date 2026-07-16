@@ -226,6 +226,11 @@ def route_stop_times_reset_manual(
     if not day_type:
         raise HTTPException(400, "Не указан тип дня")
     con = db.connect()
+    selected_scopes = sum(
+        payload.get(name) is not None for name in ("trip_id", "output_number")
+    )
+    if selected_scopes > 1:
+        raise HTTPException(400, "Укажите только одну область сброса")
     try:
         query = "SELECT id FROM route_trips WHERE route_id=? AND day_type=?"
         args = [route_id, day_type]
@@ -618,7 +623,7 @@ def _finish_timetable_sheet(ws):
                 horizontal="left" if cell.column == 1 else "center",
                 vertical="center", wrap_text=True,
             )
-            if fill:
+            if fill and cell.fill.fill_type is None:
                 cell.fill = fill
         ws.row_dimensions[row_index].height = 24
     ws.print_area = f"A1:{get_column_letter(ws.max_column)}{ws.max_row}"

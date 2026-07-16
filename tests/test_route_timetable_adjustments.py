@@ -161,3 +161,54 @@ def test_reset_manual_adjustments_recalculates_original_times(client, scheduled_
         "06:00", "06:05", "06:10", "06:15"
     ]
     assert not any(row["is_manual_override"] for row in rows)
+
+
+def test_reset_rejects_conflicting_scopes(client, scheduled_trip):
+    route_id, trip_id, _ = scheduled_trip
+    response = client.post(
+        f"/api/routes/{route_id}/stop-times/reset-manual",
+        json={"day_type": "будни", "trip_id": trip_id, "output_number": 1},
+    )
+    assert response.status_code == 400
+    assert "област" in response.json()["detail"].lower()
+
+
+def test_redistribute_remaining_rejects_terminal_edit(client, scheduled_trip):
+    route_id, trip_id, stops = scheduled_trip
+    before = _times(client, route_id)
+    response = client.patch(
+        f"/api/trips/{trip_id}/stop-times/{stops[-1]}",
+        json={
+            "departure_time": "06:17",
+            "strategy": "redistribute_remaining",
+            "reason": "Недопустимая проверка конечной",
+        },
+    )
+    assert response.status_code == 400
+    assert _times(client, route_id) == before
+
+
+def test_legacy_departure_edit_recalculates_and_clears_manual_rows(
+    client, scheduled_trip
+):
+    route_id, trip_id, stops = scheduled_trip
+    changed = client.patch(
+        f"/api/trips/{trip_id}/stop-times/{stops[1]}",
+        json={
+            "departure_time": "06:07",
+            "strategy": "shift_following",
+            "reason": "Временная корректировка",
+        },
+    )
+    assert changed.status_code == 200, changed.text
+    trip = client.get(
+        f"/api/trips?route_id={route_id}&day_type=будни"
+    ).json()["items"][0]
+    trip["dep_time"] = "07:00"
+    trip["arr_time"] = "07:15"
+    response = client.post("/api/trips", json=trip)
+    assert response.status_code == 200, response.text
+    rows = _times(client, route_id)
+    assert rows[0]["departure_time"] == "07:00"
+    assert rows[-1]["arrival_time"] == "07:15"
+    assert not any(row["is_manual_override"] for row in rows)

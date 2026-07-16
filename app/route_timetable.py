@@ -117,8 +117,7 @@ def adjust_stop_times(rows, *, route_stop_id, departure_sec, strategy):
         old_span = final_arrival - old_departure
         new_span = final_arrival - new_departure
         if selected_index == len(adjusted) - 1:
-            selected["arrival_sec"] = new_departure - dwell
-            selected["departure_sec"] = new_departure
+            raise ValueError("Конечную остановку нельзя перераспределить до конечной")
         else:
             if old_span <= 0 or new_span <= len(adjusted) - selected_index - 1:
                 raise ValueError("Оставшегося времени недостаточно для перераспределения")
