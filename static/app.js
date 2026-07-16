@@ -1054,14 +1054,146 @@ function scheduleOpenPeriods() {
 }
 
 
+function scheduleGenerationDiff(st) {
+  const preview = st.generationPreview;
+  if (!preview) return "";
+  const diff = preview.diff || {};
+  const trips = preview.trips || [];
+  const first = trips.length ? trips[0].dep_time : "—";
+  const last = trips.length ? trips[trips.length - 1].arr_time : "—";
+  return `<section class="panel schedule-generation-diff">
+    <div class="schedule-preview-head"><div><h3>Предпросмотр нового расписания</h3>
+      <p class="muted">Сохранённые рейсы ещё не изменены. Применение заменит расписание выбранного типа дня.</p></div>
+      <span class="badge b-inf">только просмотр</span></div>
+    <div class="cards">
+      <div class="card"><div class="num">${esc(diff.old_trip_count || 0)} → ${esc(diff.new_trip_count || 0)}</div><div class="lbl">рейсов</div></div>
+      <div class="card"><div class="num">${esc(preview.max_buses_required || 0)}</div><div class="lbl">максимальная потребность</div></div>
+      <div class="card"><div class="num">${esc(first)}–${esc(last)}</div><div class="lbl">границы движения</div></div>
+    </div>
+    ${(preview.warnings || []).map(w => `<div class="vio w">${esc(w.from || "")} → ${esc(w.to || "")}: ${esc(w.delta || 0)}</div>`).join("")}
+    <div class="toolbar"><button class="btn" onclick="scheduleGenerationApply()">Применить расписание</button>
+      <button class="btn ghost" onclick="_sched.generationPreview=null;route()">Отменить предпросмотр</button></div>
+  </section>`;
+}
+
+async function scheduleGenerationPreview() {
+  const st = window._sched;
+  const routeRef = REFS.routes.find(r => r.id === st.route_id) || {};
+  const values = await formModal("Предпросмотр генерации по остановкам", [
+    { k: "outputs", label: "Количество выходов", type: "number", def: routeRef.outputs_count || 1 },
+    { k: "terminal_layover_min", label: "Отстой на конечной, мин", type: "number", def: 6 },
+  ], {}, "Сначала будет создан безопасный предпросмотр без изменения сохранённых рейсов.");
+  if (!values) return;
+  try {
+    st.generationPreview = await api(`/api/routes/${st.route_id}/schedule-generation/preview`, {
+      method: "POST", body: {
+        day_type: st.day_type,
+        outputs: +values.outputs,
+        terminal_layover_min: +values.terminal_layover_min,
+      },
+    });
+    route();
+  } catch (error) { toast(error.message, true); }
+}
+
+async function scheduleGenerationApply() {
+  const st = window._sched;
+  const preview = st.generationPreview;
+  if (!preview || !confirm("Заменить сохранённое расписание результатом предпросмотра?")) return;
+  try {
+    const result = await api(`/api/routes/${st.route_id}/schedule-generation/apply`, {
+      method: "POST", body: { day_type: st.day_type, preview_token: preview.preview_token },
+    });
+    st.generationPreview = null;
+    toast(`Применено рейсов: ${result.trips}`);
+    route();
+  } catch (error) { toast(error.message, true); }
+}
+
+function scheduleStopMatrix(data) {
+  const st = window._sched;
+  const trips = data && data.trips || [];
+  const directions = { "прямое": "forward", forward: "forward", "обратное": "backward", backward: "backward" };
+  const outputOptions = [...new Set(trips.map(t => t.output_number))].sort((a, b) => a - b);
+  const periodOptions = [...new Set(trips.map(t => t.period_id).filter(Boolean))].sort((a, b) => a - b);
+  const chosenDirection = st.matrixDirection || "";
+  const chosenOutput = +(st.matrixOutput || 0);
+  const chosenPeriod = +(st.matrixPeriod || 0);
+  const filtered = trips.filter(t =>
+    (!chosenDirection || directions[t.direction] === chosenDirection) &&
+    (!chosenOutput || t.output_number === chosenOutput) &&
+    (!chosenPeriod || t.period_id === chosenPeriod));
+  const tables = ["forward", "backward"].filter(d => !chosenDirection || d === chosenDirection).map(direction => {
+    const directionTrips = filtered.filter(t => directions[t.direction] === direction);
+    const stops = data.stops && data.stops[direction] || [];
+    if (!directionTrips.length || !stops.length) return "";
+    const head = directionTrips.map(t => `<th>Вых. ${esc(t.output_number)} · рейс ${esc(t.trip_number)}<br>
+      <span class="muted">${esc(t.dep_time)}–${esc(t.arr_time)}</span>
+      <button class="btn small ghost" onclick="scheduleStopOverridesReset('trip',${t.trip_id})">сброс</button></th>`).join("");
+    const rows = stops.map(stop => `<tr><th class="schedule-stop-name">${esc(stop.sequence)}. ${esc(stop.stop_name)}</th>${directionTrips.map(trip => {
+      const row = (trip.times || []).find(x => x.route_stop_id === stop.id);
+      if (!row) return `<td class="schedule-stop-cell muted">—</td>`;
+      const dwell = row.arrival_time !== row.departure_time;
+      const manual = row.is_manual_override ? " schedule-stop-time-manual" : "";
+      const title = row.is_manual_override ? `${row.override_reason || "Ручная корректировка"} (${row.override_strategy || ""})` : "Нажмите для корректировки";
+      return `<td class="schedule-stop-cell${manual}" title="${esc(title)}" onclick='scheduleStopTimeEdit(${trip.trip_id},${row.route_stop_id},${JSON.stringify(row).replace(/'/g, "&#39;")})'>
+        ${dwell ? `<span>${esc(row.arrival_time)}</span><b>${esc(row.departure_time)}</b>` : `<b>${esc(row.departure_time)}</b>`}
+        ${row.is_manual_override ? '<i>ручн.</i>' : ''}</td>`;
+    }).join("")}</tr>`).join("");
+    return `<h4>${direction === "forward" ? "Прямое направление" : "Обратное направление"}</h4>
+      <div class="schedule-stop-matrix"><table><thead><tr><th class="schedule-stop-name">Остановка</th>${head}</tr></thead><tbody>${rows}</tbody></table></div>`;
+  }).join("");
+  return `<section class="panel"><div class="schedule-preview-head"><div><h3>Поостановочное расписание</h3>
+    <p class="muted">Нажмите время для ручной корректировки. Выделенные ячейки содержат ручные изменения.</p></div></div>
+    <div class="schedule-matrix-filters">
+      <select onchange="_sched.matrixDirection=this.value;route()"><option value="">оба направления</option><option value="forward" ${chosenDirection === "forward" ? "selected" : ""}>прямое</option><option value="backward" ${chosenDirection === "backward" ? "selected" : ""}>обратное</option></select>
+      <select onchange="_sched.matrixOutput=+this.value;route()"><option value="0">все выходы</option>${outputOptions.map(v => `<option value="${v}" ${chosenOutput === v ? "selected" : ""}>выход ${v}</option>`).join("")}</select>
+      <select onchange="_sched.matrixPeriod=+this.value;route()"><option value="0">все периоды</option>${periodOptions.map(v => `<option value="${v}" ${chosenPeriod === v ? "selected" : ""}>период ${v}</option>`).join("")}</select>
+      ${chosenOutput ? `<button class="btn small ghost" onclick="scheduleStopOverridesReset('output',${chosenOutput})">Сбросить выход</button>` : ""}
+      <button class="btn small ghost" onclick="scheduleStopOverridesReset('day')">Сбросить день</button>
+    </div>${tables || '<div class="muted">Нет сохранённого времени по остановкам.</div>'}</section>`;
+}
+
+async function scheduleStopTimeEdit(tripId, routeStopId, current) {
+  const values = await formModal("Корректировка времени остановки", [
+    { k: "departure_time", label: "Отправление", type: "time", def: current.departure_time },
+    { k: "strategy", label: "Способ изменения", type: "select", options: [
+      ["selected_only", "Только выбранная остановка"],
+      ["shift_following", "Сдвинуть выбранную и последующие"],
+      ["redistribute_remaining", "Перераспределить до конечной"],
+    ] },
+    { k: "reason", label: "Причина (обязательно)", def: "" },
+  ]);
+  if (!values) return;
+  try {
+    await api(`/api/trips/${tripId}/stop-times/${routeStopId}`, { method: "PATCH", body: values });
+    toast("Время остановки сохранено");
+    route();
+  } catch (error) { toast(error.message, true); }
+}
+
+async function scheduleStopOverridesReset(scope, value) {
+  const st = window._sched;
+  if (!confirm("Сбросить ручные корректировки и пересчитать выбранные рейсы?")) return;
+  const body = { day_type: st.day_type };
+  if (scope === "trip") body.trip_id = value;
+  if (scope === "output") body.output_number = value;
+  try {
+    const result = await api(`/api/routes/${st.route_id}/stop-times/reset-manual`, { method: "POST", body });
+    toast(`Пересчитано рейсов: ${result.updated}`);
+    route();
+  } catch (error) { toast(error.message, true); }
+}
+
 VIEWS.schedule = async function () {
   const st = window._sched || { route_id: REFS.routes[0] ? REFS.routes[0].id : 0, day_type: "\u0431\u0443\u0434\u043d\u0438", q: "" };
   window._sched = st;
   if (!st.route_id) { $("content").innerHTML = "<div class='panel'>\u0421\u043d\u0430\u0447\u0430\u043b\u0430 \u0441\u043e\u0437\u0434\u0430\u0439\u0442\u0435 \u043c\u0430\u0440\u0448\u0440\u0443\u0442 \u0432 \u0441\u043f\u0440\u0430\u0432\u043e\u0447\u043d\u0438\u043a\u0435.</div>"; return; }
-  const [tr, chk, sum] = await Promise.all([
+  const [tr, chk, sum, matrix] = await Promise.all([
     api(`/api/trips?route_id=${st.route_id}&day_type=${encodeURIComponent(st.day_type)}`),
     api(`/api/routes/${st.route_id}/check?day_type=${encodeURIComponent(st.day_type)}`),
-    api(`/api/routes/${st.route_id}/schedule-summary?day_type=${encodeURIComponent(st.day_type)}`)]);
+    api(`/api/routes/${st.route_id}/schedule-summary?day_type=${encodeURIComponent(st.day_type)}`),
+    api(`/api/routes/${st.route_id}/stop-times?day_type=${encodeURIComponent(st.day_type)}`)]);
   const q = (st.q || "").toLowerCase();
   const problemsByTrip = tripProblemMap(chk.problems);
   const visibleTrips = tr.items.filter(t => !q || JSON.stringify(t).toLowerCase().includes(q));
@@ -1091,6 +1223,8 @@ VIEWS.schedule = async function () {
         <input placeholder="\u043f\u043e\u0438\u0441\u043a \u043f\u043e \u0440\u0435\u0439\u0441\u0430\u043c\u2026" value="${esc(st.q || "")}" onchange="_sched.q=this.value; route()">
       </div>
       <div class="toolbar">
+        <button class="btn" onclick="scheduleGenerationPreview()">Предпросмотр генерации по остановкам</button>
+        <span class="muted">Совместимость:</span>
         <button class="btn" onclick="schedGen()">\u0421\u0433\u0435\u043d\u0435\u0440\u0438\u0440\u043e\u0432\u0430\u0442\u044c \u0440\u0430\u0441\u043f\u0438\u0441\u0430\u043d\u0438\u0435</button>
         <button class="btn sec" onclick="tripEdit({route_id:${st.route_id}, day_type:'${st.day_type}', output_number:1, shift_number:1, direction:'\u043f\u0440\u044f\u043c\u043e\u0435'})">+ \u0440\u0435\u0439\u0441</button>
         <button class="btn sec" onclick="schedBulkShift()">\u0421\u0434\u0432\u0438\u043d\u0443\u0442\u044c \u0432\u0440\u0435\u043c\u044f</button>
@@ -1101,6 +1235,8 @@ VIEWS.schedule = async function () {
     ${scheduleCards(sum)}
         <button class="btn sec" onclick="schedulePeriodPreview()">Предпросмотр по периодам</button>
         <button class="btn ghost" onclick="scheduleOpenPeriods()">Настроить периоды</button>
+    ${scheduleGenerationDiff(st)}
+    ${scheduleStopMatrix(matrix)}
     <div class="schedule-layout">
       <div>
         <div class="panel"><h3>\u0420\u0435\u0439\u0441\u044b (${visibleTrips.length}/${tr.items.length})</h3>${tbl(["\u0412\u044b\u0445\u043e\u0434", "\u0421\u043c\u0435\u043d\u0430", "\u2116", "\u041d\u0430\u043f\u0440.", "\u041e\u0442\u043f\u0440.", "\u041f\u0440\u0438\u0431.", "\u041a\u043c", "\u041e\u0442\u0441\u0442\u043e\u0439", "\u041f\u0440\u043e\u0432\u0435\u0440\u043a\u0430", ""], trips)}</div>
