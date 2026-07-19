@@ -10,6 +10,7 @@ from .api_refs import router as refs_router
 from .api_route_network import router as route_network_router
 from .api_route_periods import router as route_periods_router
 from .api_route_timetable import router as route_timetable_router
+from .api_route_shifts import router as route_shifts_router
 from .api_planning import router as planning_router
 from .api_waybills import router as waybills_router
 from .api_time import router as time_router
@@ -74,6 +75,7 @@ app.include_router(refs_router)
 app.include_router(route_network_router)
 app.include_router(route_periods_router)
 app.include_router(route_timetable_router)
+app.include_router(route_shifts_router)
 app.include_router(planning_router)
 app.include_router(waybills_router)
 app.include_router(time_router)
