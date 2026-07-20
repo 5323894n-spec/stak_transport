@@ -749,7 +749,10 @@ def test_malformed_preview_json_returns_400_without_writes(
     _assert_old_scope_unchanged(token, old_shift)
 
 
-@pytest.mark.parametrize("state_change", ["type_max", "handover", "auto_split"])
+@pytest.mark.parametrize(
+    "state_change",
+    ["type_max", "driver_slots", "handover", "auto_split"],
+)
 def test_apply_rejects_stale_shift_generation_state(
     client, route_id, state_change
 ):
@@ -762,6 +765,11 @@ def test_apply_rejects_stale_shift_generation_state(
             con.execute(
                 "UPDATE shift_types SET planned_duration_min=30,max_duration_min=30 "
                 "WHERE id=?",
+                (shift_type_id,),
+            )
+        elif state_change == "driver_slots":
+            con.execute(
+                "UPDATE shift_types SET driver_slots=2 WHERE id=?",
                 (shift_type_id,),
             )
         else:
@@ -785,4 +793,29 @@ def test_apply_rejects_stale_shift_generation_state(
 
     response = apply(client, route_id, token)
     assert response.status_code == 409, response.text
+    _assert_old_scope_unchanged(token, old_shift)
+
+
+def test_generated_driver_slots_payload_tamper_returns_400(client, route_id):
+    import app.db as db
+
+    token, old_shift, _ = _existing_shift_preview(client, route_id)
+    con = db.connect()
+    try:
+        plan = json.loads(con.execute(
+            "SELECT payload_json FROM shift_generation_previews WHERE token=?",
+            (token,),
+        ).fetchone()[0])
+        plan["outputs"][0]["shifts"][0]["driver_slots"] = 2
+        con.execute(
+            "UPDATE shift_generation_previews SET payload_json=? WHERE token=?",
+            (json.dumps(plan), token),
+        )
+        con.commit()
+    finally:
+        con.close()
+
+    response = apply(client, route_id, token)
+    assert response.status_code == 400, response.text
+    assert "водител" in response.json()["detail"].lower()
     _assert_old_scope_unchanged(token, old_shift)

@@ -838,10 +838,6 @@ def _validated_stored_plan(con, preview, route_id, day_type):
                 expected = _locked_shift_payload(locked)
                 if any(expected[key] != shift.get(key) for key in expected):
                     raise ValueError("Заблокированная смена была изменена")
-            elif int(shift["driver_slots"]) != int(shift_type["driver_slots"]):
-                raise ValueError(
-                    "Количество водителей не соответствует типу смены"
-                )
     if planned_numbers != set(by_output):
         raise ValueError("План смен покрывает не все выпуски")
     if used_type_ids != state_type_ids:
@@ -865,6 +861,10 @@ def _validated_stored_plan(con, preview, route_id, day_type):
                 continue
             duration = int(shift["end_sec"]) - int(shift["start_sec"])
             shift_type = types_by_id[int(shift["shift_type_id"])]
+            if int(shift["driver_slots"]) != int(shift_type["driver_slots"]):
+                raise ValueError(
+                    "Количество водителей не соответствует типу смены"
+                )
             if duration > int(shift_type["max_duration_min"]) * 60:
                 raise ValueError("Длительность смены превышает максимум типа")
             if not shift_type["active"]:
