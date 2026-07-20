@@ -1053,6 +1053,248 @@ function scheduleOpenPeriods() {
   routeCardOpen(st.route_id);
 }
 
+function scheduleShiftClock(seconds) {
+  const value = Math.max(0, Number(seconds) || 0);
+  const hours = Math.floor(value / 3600);
+  const minutes = Math.floor(value % 3600 / 60);
+  return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}`;
+}
+
+function scheduleShiftDuration(startSec, endSec) {
+  const minutes = Math.max(0, Math.round(((Number(endSec) || 0) - (Number(startSec) || 0)) / 60));
+  return `${Math.floor(minutes / 60)} ч ${minutes % 60} мин`;
+}
+
+function scheduleShiftCandidateDates(dayType) {
+  const weekdays = dayType === "суббота" ? [6] : dayType === "воскресенье" ? [0] : [1, 2, 3, 4, 5];
+  const result = [];
+  const start = new Date();
+  start.setHours(12, 0, 0, 0);
+  for (let offset = 0; offset < 42; offset += 1) {
+    const date = new Date(start);
+    date.setDate(start.getDate() + offset);
+    if (weekdays.includes(date.getDay())) result.push(date.toISOString().slice(0, 10));
+  }
+  return result;
+}
+
+async function scheduleLoadOutputShifts(routeId, dayType) {
+  for (const date of scheduleShiftCandidateDates(dayType)) {
+    const result = await api(`/api/roster/schedule-options?route_id=${routeId}&date=${date}`);
+    if (result.day_type === dayType) return { items: result.outputs || [], date };
+  }
+  throw new Error(`Не удалось подобрать календарную дату для типа дня «${dayType}»`);
+}
+
+function scheduleShiftType(st, shift) {
+  return (st.shiftTypes || []).find(item => +item.id === +shift.shift_type_id) || {
+    name: shift.shift_type_name || "Тип смены",
+    color: shift.shift_type_color || "#64748b",
+  };
+}
+
+function scheduleShiftColor(value) {
+  return /^#[0-9a-f]{6}$/i.test(String(value || "")) ? value : "#64748b";
+}
+
+function scheduleShiftTripLabel(st, tripId) {
+  const trip = (st.scheduleTrips || []).find(item => +item.id === +tripId);
+  return trip ? `рейс ${trip.trip_number}` : `ID ${tripId}`;
+}
+
+function scheduleShiftSettings(st) {
+  const settings = st.shiftSettings || {};
+  const types = st.shiftTypes || [];
+  const options = (selectedId, empty) => `${empty ? '<option value="">не использовать</option>' : ""}${types.map(type =>
+    `<option value="${+type.id}" ${+selectedId === +type.id ? "selected" : ""}>${esc(type.name)} · ${esc(type.planned_duration_min)} мин</option>`
+  ).join("")}`;
+  const disabled = st.shiftSettingsSaving ? "disabled" : "";
+  return `<section class="panel schedule-shift-settings" aria-labelledby="schedule-shift-settings-title">
+    <div class="schedule-preview-head"><div><h3 id="schedule-shift-settings-title">Настройки смен</h3>
+      <p class="muted">Параметры маршрута «${esc(st.day_type)}» используются для безопасного предпросмотра разделения выпусков.</p></div>
+      <span class="badge ${settings.persisted ? "b-ok" : "b-mut"}">${settings.persisted ? "сохранено" : "значения по умолчанию"}</span></div>
+    <div class="schedule-shift-settings-grid">
+      <label class="f" for="schedule-shift-default-type">Основной тип смены<select id="schedule-shift-default-type" ${disabled}>${options(settings.default_shift_type_id, false)}</select></label>
+      <label class="f" for="schedule-shift-long-type">Тип длинной смены<select id="schedule-shift-long-type" ${disabled}>${options(settings.long_shift_type_id, true)}</select></label>
+      <label class="f" for="schedule-shift-handover">Пересмена, мин<input id="schedule-shift-handover" type="number" min="0" value="${esc(settings.handover_min ?? 10)}" ${disabled}></label>
+      <label class="f" for="schedule-shift-threshold">Порог длинного выпуска, мин<input id="schedule-shift-threshold" type="number" min="1" value="${esc(settings.long_run_threshold_min ?? 720)}" ${disabled}></label>
+      <label class="schedule-shift-checkbox" for="schedule-shift-auto-split"><input id="schedule-shift-auto-split" type="checkbox" ${settings.auto_split ? "checked" : ""} ${disabled}> Автоматически делить выпуск на смены</label>
+    </div>
+    <div id="schedule-shift-settings-error" class="schedule-shift-error" role="alert">${esc(st.shiftSettingsError || "")}</div>
+    <div class="toolbar"><button class="btn sec" onclick="scheduleShiftSettingsSave()" ${disabled}>${st.shiftSettingsSaving ? "Сохранение…" : "Сохранить настройки"}</button>
+      <button id="schedule-shift-preview-button" class="btn" onclick="scheduleShiftPreview()" ${st.shiftPreviewLoading ? "disabled" : ""}>${st.shiftPreviewLoading ? "Расчёт…" : "Предпросмотр смен"}</button></div>
+  </section>`;
+}
+
+async function scheduleShiftSettingsSave() {
+  const st = window._sched;
+  if (!st || st.shiftSettingsSaving) return;
+  st.shiftSettingsSaving = true;
+  st.shiftSettingsError = "";
+  const button = document.querySelector(".schedule-shift-settings .btn.sec");
+  if (button) { button.disabled = true; button.textContent = "Сохранение…"; }
+  try {
+    const body = {
+      default_shift_type_id: +$("schedule-shift-default-type").value,
+      long_shift_type_id: $("schedule-shift-long-type").value ? +$("schedule-shift-long-type").value : null,
+      handover_min: +$("schedule-shift-handover").value,
+      long_run_threshold_min: +$("schedule-shift-threshold").value,
+      auto_split: $("schedule-shift-auto-split").checked,
+    };
+    st.shiftSettings = await api(`/api/routes/${st.route_id}/shift-settings/${encodeURIComponent(st.day_type)}`, { method: "PUT", body });
+    toast("Настройки смен сохранены");
+    route();
+  } catch (error) {
+    st.shiftSettingsError = error.message;
+    const box = $("schedule-shift-settings-error");
+    if (box) box.textContent = error.message;
+    toast(error.message, true);
+  } finally {
+    st.shiftSettingsSaving = false;
+    if (button && document.body.contains(button)) { button.disabled = false; button.textContent = "Сохранить настройки"; }
+  }
+}
+
+function scheduleShiftPreviewPanel(st) {
+  const preview = st.shiftPreview;
+  if (!preview) return "";
+  const diff = preview.diff || {};
+  const conflicts = preview.conflicts || [];
+  const outputs = (preview.outputs || []).map(output => {
+    const cards = (output.shifts || []).map(shift => {
+      const type = scheduleShiftType(st, shift);
+      return `<div class="schedule-shift-card ${shift.is_manual_locked ? "schedule-shift-locked" : ""}">
+        <div class="schedule-shift-card-head"><span class="schedule-shift-type" style="--shift-color:${scheduleShiftColor(type.color)}">${esc(type.name)}</span><b>Смена ${esc(shift.shift_number)}</b></div>
+        <div>${esc(scheduleShiftTripLabel(st, shift.trip_from_id))}–${esc(scheduleShiftTripLabel(st, shift.trip_to_id))}</div>
+        <div class="muted">${esc(scheduleShiftClock(shift.start_sec))}–${esc(scheduleShiftClock(shift.end_sec))} · ${esc(scheduleShiftDuration(shift.start_sec, shift.end_sec))}</div>
+        <div class="schedule-driver-slots" aria-label="Водительских мест: ${esc(shift.driver_slots)}">${"●".repeat(Math.max(1, +shift.driver_slots || 1))} ${esc(shift.driver_slots)} вод.</div>
+      </div>`;
+    }).join("");
+    const outputConflicts = (output.conflicts || []).map(conflict => `<div class="schedule-shift-conflict" role="alert"><b>${esc(conflict.code)}</b> ${esc(conflict.message)}</div>`).join("");
+    return `<section class="schedule-output-group"><h4>Выход ${esc(output.output_number)}</h4><div class="schedule-output-shifts">${cards || '<span class="muted">Смены не предложены.</span>'}</div>${outputConflicts}</section>`;
+  }).join("");
+  const applyDisabled = !preview.preview_token || conflicts.length || st.shiftApplyLoading;
+  return `<section class="panel schedule-shift-preview" aria-labelledby="schedule-shift-preview-title">
+    <div class="schedule-preview-head"><div><h3 id="schedule-shift-preview-title">Предпросмотр плана смен</h3>
+      <p class="muted"><b>Только просмотр:</b> расчёт не записывает output_shifts, рейсы или назначения водителей.</p></div><span class="badge b-inf">без записи</span></div>
+    <div class="cards"><div class="card"><div class="num">${esc(diff.old_shift_count || 0)} → ${esc(diff.new_shift_count || 0)}</div><div class="lbl">смен</div></div>
+      <div class="card"><div class="num">${esc(diff.old_driver_slots || 0)} → ${esc(diff.new_driver_slots || 0)}</div><div class="lbl">водительских мест</div></div></div>
+    ${conflicts.length ? `<div class="schedule-shift-conflict" role="alert"><b>Применение заблокировано:</b> ${esc(conflicts.length)} конфликт(а).</div>` : ""}
+    ${outputs}
+    <div class="toolbar"><button id="schedule-shift-apply" class="btn" onclick="scheduleShiftApply()" ${applyDisabled ? "disabled" : ""}>${st.shiftApplyLoading ? "Применение…" : "Применить смены"}</button>
+      <button class="btn ghost" onclick="_sched.shiftPreview=null;route()" ${st.shiftApplyLoading ? "disabled" : ""}>Отмена</button></div>
+  </section>`;
+}
+
+async function scheduleShiftPreview() {
+  const st = window._sched;
+  if (!st || st.shiftPreviewLoading) return;
+  st.shiftPreviewLoading = true;
+  const button = $("schedule-shift-preview-button");
+  if (button) { button.disabled = true; button.textContent = "Расчёт…"; }
+  try {
+    st.shiftPreview = await api(`/api/routes/${st.route_id}/shift-generation/preview`, {
+      method: "POST", body: { day_type: st.day_type, preserve_locked: true },
+    });
+    route();
+  } catch (error) { toast(error.message, true); }
+  finally {
+    st.shiftPreviewLoading = false;
+    if (button && document.body.contains(button)) { button.disabled = false; button.textContent = "Предпросмотр смен"; }
+  }
+}
+
+async function scheduleShiftApply() {
+  const st = window._sched;
+  const preview = st && st.shiftPreview;
+  if (!preview || !preview.preview_token || (preview.conflicts || []).length || st.shiftApplyLoading) return;
+  if (!confirm("Применить показанный план смен к выбранному маршруту и типу дня?")) return;
+  st.shiftApplyLoading = true;
+  const button = $("schedule-shift-apply");
+  if (button) { button.disabled = true; button.textContent = "Применение…"; }
+  try {
+    const result = await api(`/api/routes/${st.route_id}/shift-generation/apply`, {
+      method: "POST", body: { day_type: st.day_type, preview_token: preview.preview_token },
+    });
+    st.shiftPreview = null;
+    toast(`Применено смен: ${result.shift_count}`);
+    route();
+  } catch (error) { toast(error.message, true); }
+  finally { st.shiftApplyLoading = false; }
+}
+
+function scheduleOutputShifts(st) {
+  const structural = (st.outputShifts || []).filter(item => item.output_shift_id);
+  const byOutput = {};
+  structural.forEach(item => { (byOutput[item.output_number] = byOutput[item.output_number] || []).push(item); });
+  const groups = Object.entries(byOutput).sort((a, b) => +a[0] - +b[0]).map(([outputNumber, shifts]) => {
+    const cards = shifts.sort((a, b) => +a.shift_number - +b.shift_number).map(shift => {
+      const type = scheduleShiftType(st, shift);
+      const locked = shift.is_manual_locked;
+      const assignments = shift.assignment_count == null ? "" : `<span class="badge b-inf">назначений: ${esc(shift.assignment_count)}</span>`;
+      return `<article class="schedule-shift-card ${locked ? "schedule-shift-locked" : ""}">
+        <div class="schedule-shift-card-head"><span class="schedule-shift-type" style="--shift-color:${scheduleShiftColor(type.color)}">${esc(type.name)}</span><b>Смена ${esc(shift.shift_number)}</b></div>
+        <div>${esc(scheduleShiftTripLabel(st, shift.trip_from_id))}–${esc(scheduleShiftTripLabel(st, shift.trip_to_id))}</div>
+        <div class="muted">${esc(scheduleShiftClock(shift.start_sec))}–${esc(scheduleShiftClock(shift.end_sec))} · ${esc(scheduleShiftDuration(shift.start_sec, shift.end_sec))}</div>
+        <div class="schedule-shift-meta"><span class="schedule-driver-slots" aria-label="Водительских мест: ${esc(shift.driver_slots)}">${"●".repeat(Math.max(1, +shift.driver_slots || 1))} ${esc(shift.driver_slots)} вод.</span>${assignments}</div>
+        ${locked ? `<div class="schedule-shift-lock-reason"><b>Ручная блокировка</b>${shift.manual_reason ? `: ${esc(shift.manual_reason)}` : ""}</div>` : ""}
+        <div class="toolbar"><button class="btn small sec" onclick="scheduleShiftEdit(${+shift.output_shift_id})" aria-label="Изменить границы смены ${esc(shift.shift_number)}">Изменить границы</button>
+          <button class="btn small ghost" onclick="scheduleShiftReset('shift',${+shift.output_shift_id})" aria-label="Сбросить ручные изменения смены ${esc(shift.shift_number)}">Сбросить смену</button></div>
+      </article>`;
+    }).join("");
+    return `<section class="schedule-output-group"><div class="schedule-output-head"><h4>Выход ${esc(outputNumber)}</h4><button class="btn small ghost" onclick="scheduleShiftReset('output',${+outputNumber})">Сбросить выход</button></div><div class="schedule-output-shifts">${cards}</div></section>`;
+  }).join("");
+  return `<section class="panel schedule-output-shift-workspace" aria-labelledby="schedule-output-shifts-title">
+    <div class="schedule-preview-head"><div><h3 id="schedule-output-shifts-title">Сохранённые смены выходов</h3><p class="muted">Структурные смены для графика водителей${st.outputShiftDate ? ` · назначения на ${esc(st.outputShiftDate)}` : ""}.</p></div>
+      <button class="btn small ghost" onclick="scheduleShiftReset('day')" ${structural.length ? "" : "disabled"}>Сбросить день</button></div>
+    ${groups || '<div class="muted">Сохранённых структурных смен пока нет. Сначала выполните предпросмотр и применение.</div>'}
+  </section>`;
+}
+
+async function scheduleShiftEdit(shiftId) {
+  const st = window._sched;
+  const shift = (st.outputShifts || []).find(item => +item.output_shift_id === +shiftId);
+  if (!shift) return toast("Смена не найдена в текущем расписании", true);
+  const trips = (st.scheduleTrips || []).filter(item => +item.output_number === +shift.output_number);
+  const tripOptions = trips.map(item => [item.id, `Рейс ${item.trip_number} · ${item.dep_time}–${item.arr_time}`]);
+  const values = await formModal(`Границы смены ${shift.shift_number}, выход ${shift.output_number}`, [
+    { k: "trip_from_id", label: "Первый рейс", type: "select", options: tripOptions },
+    { k: "trip_to_id", label: "Последний рейс", type: "select", options: tripOptions },
+    { k: "shift_type_id", label: "Тип смены", type: "select", options: (st.shiftTypes || []).map(type => [type.id, type.name]) },
+    { k: "reason", label: "Причина (обязательно)", def: "" },
+  ], { trip_from_id: shift.trip_from_id, trip_to_id: shift.trip_to_id, shift_type_id: shift.shift_type_id });
+  if (!values) return;
+  const reason = String(values.reason || "").trim();
+  if (!reason) return toast("Укажите причину ручного изменения", true);
+  try {
+    await api(`/api/output-shifts/${+shiftId}`, { method: "PATCH", body: {
+      trip_from_id: +values.trip_from_id,
+      trip_to_id: +values.trip_to_id,
+      shift_type_id: +values.shift_type_id,
+      reason,
+    } });
+    toast("Границы смены сохранены");
+    route();
+  } catch (error) { toast(error.message, true); }
+}
+
+async function scheduleShiftReset(scope, value) {
+  const st = window._sched;
+  if (!st || st.shiftResetLoading) return;
+  const labels = { shift: "смену", output: "выход", day: "все смены дня" };
+  if (!labels[scope] || !confirm(`Сбросить ручные изменения: ${labels[scope]}?`)) return;
+  const body = { day_type: st.day_type };
+  if (scope === "shift") body.shift_id = +value;
+  if (scope === "output") body.output_number = +value;
+  st.shiftResetLoading = true;
+  try {
+    await api(`/api/routes/${st.route_id}/output-shifts/reset-manual`, { method: "POST", body });
+    toast("Ручные изменения смен сброшены");
+    route();
+  } catch (error) { toast(error.message, true); }
+  finally { st.shiftResetLoading = false; }
+}
+
 
 function scheduleGenerationDiff(st) {
   const preview = st.generationPreview;
@@ -1189,11 +1431,20 @@ VIEWS.schedule = async function () {
   const st = window._sched || { route_id: REFS.routes[0] ? REFS.routes[0].id : 0, day_type: "\u0431\u0443\u0434\u043d\u0438", q: "" };
   window._sched = st;
   if (!st.route_id) { $("content").innerHTML = "<div class='panel'>\u0421\u043d\u0430\u0447\u0430\u043b\u0430 \u0441\u043e\u0437\u0434\u0430\u0439\u0442\u0435 \u043c\u0430\u0440\u0448\u0440\u0443\u0442 \u0432 \u0441\u043f\u0440\u0430\u0432\u043e\u0447\u043d\u0438\u043a\u0435.</div>"; return; }
-  const [tr, chk, sum, matrix] = await Promise.all([
+  const [tr, chk, sum, matrix, shiftTypes, shiftSettings, outputShifts] = await Promise.all([
     api(`/api/trips?route_id=${st.route_id}&day_type=${encodeURIComponent(st.day_type)}`),
     api(`/api/routes/${st.route_id}/check?day_type=${encodeURIComponent(st.day_type)}`),
     api(`/api/routes/${st.route_id}/schedule-summary?day_type=${encodeURIComponent(st.day_type)}`),
-    api(`/api/routes/${st.route_id}/stop-times?day_type=${encodeURIComponent(st.day_type)}`)]);
+    api(`/api/routes/${st.route_id}/stop-times?day_type=${encodeURIComponent(st.day_type)}`),
+    api("/api/shift-types"),
+    api(`/api/routes/${st.route_id}/shift-settings/${encodeURIComponent(st.day_type)}`),
+    scheduleLoadOutputShifts(st.route_id, st.day_type),
+  ]);
+  st.scheduleTrips = tr.items;
+  st.shiftTypes = shiftTypes.items || [];
+  st.shiftSettings = shiftSettings;
+  st.outputShifts = outputShifts.items;
+  st.outputShiftDate = outputShifts.date;
   const q = (st.q || "").toLowerCase();
   const problemsByTrip = tripProblemMap(chk.problems);
   const visibleTrips = tr.items.filter(t => !q || JSON.stringify(t).toLowerCase().includes(q));
@@ -1213,14 +1464,14 @@ VIEWS.schedule = async function () {
   }).join("");
   $("content").innerHTML = `<div class="schedule-hero">
       <div class="toolbar">
-        <select onchange="_sched.route_id=+this.value;_sched.periodPreview=null;route()">
+        <select aria-label="Маршрут расписания" onchange="_sched.route_id=+this.value;_sched.periodPreview=null;_sched.shiftPreview=null;route()">
           ${REFS.routes.map(r => `<option value="${r.id}" ${r.id === st.route_id ? "selected" : ""}>\u2116 ${esc(r.number)} \u2014 ${esc(r.name || "")} (${esc(r.comm_type)})</option>`).join("")}
         </select>
         <div class="tabs" style="margin:0; border:none">
-          ${["\u0431\u0443\u0434\u043d\u0438", "\u0441\u0443\u0431\u0431\u043e\u0442\u0430", "\u0432\u043e\u0441\u043a\u0440\u0435\u0441\u0435\u043d\u044c\u0435"].map(t => `<button class="${st.day_type === t ? "on" : ""}" onclick="_sched.day_type='${t}'; route()">${t}</button>`).join("")}
+          ${["\u0431\u0443\u0434\u043d\u0438", "\u0441\u0443\u0431\u0431\u043e\u0442\u0430", "\u0432\u043e\u0441\u043a\u0440\u0435\u0441\u0435\u043d\u044c\u0435"].map(t => `<button class="${st.day_type === t ? "on" : ""}" onclick="_sched.day_type='${t}';_sched.periodPreview=null;_sched.shiftPreview=null;route()">${t}</button>`).join("")}
         </div>
         ${scheduleStatusBadge(sum)}
-        <input placeholder="\u043f\u043e\u0438\u0441\u043a \u043f\u043e \u0440\u0435\u0439\u0441\u0430\u043c\u2026" value="${esc(st.q || "")}" onchange="_sched.q=this.value; route()">
+        <input aria-label="Поиск по рейсам" placeholder="\u043f\u043e\u0438\u0441\u043a \u043f\u043e \u0440\u0435\u0439\u0441\u0430\u043c\u2026" value="${esc(st.q || "")}" onchange="_sched.q=this.value; route()">
       </div>
       <div class="toolbar">
         <button class="btn" onclick="scheduleGenerationPreview()">Предпросмотр генерации по остановкам</button>
@@ -1236,6 +1487,9 @@ VIEWS.schedule = async function () {
         <button class="btn sec" onclick="schedulePeriodPreview()">Предпросмотр по периодам</button>
         <button class="btn ghost" onclick="scheduleOpenPeriods()">Настроить периоды</button>
     ${scheduleGenerationDiff(st)}
+    ${scheduleShiftSettings(st)}
+    ${scheduleShiftPreviewPanel(st)}
+    ${scheduleOutputShifts(st)}
     ${scheduleStopMatrix(matrix)}
     <div class="schedule-layout">
       <div>

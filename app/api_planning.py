@@ -642,7 +642,8 @@ def roster_schedule_options(route_id: int, date: str, output_number: int = 0, sh
                    os.shift_type_id, st.code AS shift_type_code,
                    st.name AS shift_type_name, st.color AS shift_type_color,
                    os.start_sec, os.end_sec, os.trip_from_id, os.trip_to_id,
-                   os.driver_slots, COUNT(ra.id) AS assignment_count
+                   os.driver_slots, os.is_manual_locked, os.manual_reason,
+                   os.source, COUNT(ra.id) AS assignment_count
             FROM output_shifts os
             JOIN shift_types st ON st.id=os.shift_type_id
             LEFT JOIN roster_assignments ra
@@ -652,6 +653,8 @@ def roster_schedule_options(route_id: int, date: str, output_number: int = 0, sh
             """,
             (date, route_id, day_type),
         ))
+        for item in structural:
+            item["is_manual_locked"] = bool(item["is_manual_locked"])
         structural_by_slot = {
             (item["output_number"], item["shift_number"]): item
             for item in structural

@@ -138,6 +138,9 @@ def test_schedule_options_exposes_structural_shift_fields(tmp_path):
     assert item["driver_slots"] == 2
     assert item["assignment_count"] == 0
     assert item["available_driver_slots"] == 2
+    assert item["is_manual_locked"] is False
+    assert item["manual_reason"] is None
+    assert item["source"] == "manual"
 
 
 def test_schedule_options_uses_structural_trip_range_as_default(tmp_path):
