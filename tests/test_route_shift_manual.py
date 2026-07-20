@@ -400,3 +400,29 @@ def test_reset_wrong_day_for_valid_route_is_scoped_and_non_mutating(client):
         assert _snapshot(con, route_id) == before
     finally:
         con.close()
+
+
+def test_patch_rolls_back_when_modified_neighbor_type_is_inactive(client):
+    import app.db as db
+
+    route_id, trips, shifts, single, double = _seed_output()
+    con = db.connect()
+    try:
+        con.execute("UPDATE shift_types SET active=0 WHERE id=?", (single,))
+        con.commit()
+        before = _snapshot(con, route_id)
+    finally:
+        con.close()
+
+    response = client.patch(
+        f"/api/output-shifts/{shifts[1]}",
+        json={"trip_from_id": trips[2], "trip_to_id": trips[2],
+              "shift_type_id": double, "reason": "move inactive neighbor"},
+    )
+    assert response.status_code == 400, response.text
+    assert "актив" in response.json()["detail"].lower()
+    con = db.connect()
+    try:
+        assert _snapshot(con, route_id) == before
+    finally:
+        con.close()

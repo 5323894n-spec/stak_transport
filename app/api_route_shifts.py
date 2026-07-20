@@ -1273,6 +1273,8 @@ def _validate_changed_shift_constraints(con, before, proposed):
         shift_type = _shift_type_by_id(con, shift.get("shift_type_id"))
         if not shift_type:
             raise ValueError("Тип изменённой смены не найден")
+        if not shift_type["active"]:
+            raise ValueError("Тип изменённой смены должен быть активным")
         try:
             slots = int(shift["driver_slots"])
             expected_slots = int(shift_type["driver_slots"])
