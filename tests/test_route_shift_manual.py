@@ -426,3 +426,131 @@ def test_patch_rolls_back_when_modified_neighbor_type_is_inactive(client):
         assert _snapshot(con, route_id) == before
     finally:
         con.close()
+
+
+@pytest.mark.parametrize("operation", ["patch", "reset"])
+def test_manual_write_endpoints_return_409_when_database_is_locked(client, operation):
+    import sqlite3
+    import app.db as db
+
+    route_id, trips, shifts, single, _ = _seed_output()
+    blocked = TestClient(client.app, raise_server_exceptions=False)
+    blocked.headers.update(client.headers)
+    con = db.connect()
+    try:
+        before = _snapshot(con, route_id)
+        audit_before = con.execute("SELECT COUNT(*) FROM audit_log").fetchone()[0]
+    finally:
+        con.close()
+    from app.auth import current_user
+    client.app.dependency_overrides[current_user] = lambda: {
+        "username": "admin", "role": "админ"
+    }
+    locker = sqlite3.connect(db.DB_PATH, timeout=0)
+    try:
+        locker.execute("BEGIN IMMEDIATE")
+        if operation == "patch":
+            response = blocked.patch(
+                f"/api/output-shifts/{shifts[0]}",
+                json={"trip_from_id": trips[0], "trip_to_id": trips[0],
+                      "shift_type_id": single, "reason": "locked"},
+            )
+        else:
+            response = blocked.post(
+                f"/api/routes/{route_id}/output-shifts/reset-manual",
+                json={"day_type": DAY},
+            )
+        assert response.status_code == 409, response.text
+    finally:
+        locker.rollback()
+        locker.close()
+        client.app.dependency_overrides.pop(current_user, None)
+    con = db.connect()
+    try:
+        assert _snapshot(con, route_id) == before
+        assert con.execute("SELECT COUNT(*) FROM audit_log").fetchone()[0] == audit_before
+    finally:
+        con.close()
+
+
+def _set_trip_times(con, trips, values):
+    for trip_id, (dep, arr) in zip(trips, values):
+        con.execute("UPDATE route_trips SET dep_time=?,arr_time=? WHERE id=?",
+                    (dep, arr, trip_id))
+
+
+def test_patch_rejects_new_handover_gap_below_route_setting(client):
+    import app.db as db
+
+    route_id, trips, shifts, _, double = _seed_output()
+    con = db.connect()
+    try:
+        _set_trip_times(con, trips, [
+            ("06:00", "07:00"), ("08:00", "09:00"),
+            ("09:05", "10:05"),
+        ])
+        con.execute("UPDATE output_shifts SET start_sec=28800,end_sec=36300 "
+                    "WHERE id=?", (shifts[1],))
+        con.commit()
+        before = _snapshot(con, route_id)
+    finally:
+        con.close()
+    response = _patch(client, shifts[0], trips, double)
+    assert response.status_code == 400, response.text
+    assert "пересмен" in response.json()["detail"].lower()
+    con = db.connect()
+    try:
+        assert _snapshot(con, route_id) == before
+    finally:
+        con.close()
+
+
+def test_patch_persists_actual_handover_minutes_after_repartition(client):
+    import app.db as db
+
+    route_id, trips, shifts, _, double = _seed_output()
+    con = db.connect()
+    try:
+        _set_trip_times(con, trips, [
+            ("06:00", "07:00"), ("08:00", "09:00"),
+            ("09:15", "10:15"),
+        ])
+        con.execute("UPDATE output_shifts SET start_sec=28800,end_sec=36900 "
+                    "WHERE id=?", (shifts[1],))
+        con.commit()
+    finally:
+        con.close()
+    response = _patch(client, shifts[0], trips, double)
+    assert response.status_code == 200, response.text
+    assert [row["handover_after_min"] for row in response.json()["shifts"]] == [15, 0]
+
+
+def test_patch_two_phase_renumbers_legacy_reversed_shifts(client):
+    import app.db as db
+
+    route_id, trips, shifts, _, double = _seed_output()
+    con = db.connect()
+    try:
+        con.execute("UPDATE output_shifts SET shift_number=-1 WHERE id=?", (shifts[0],))
+        con.execute("UPDATE output_shifts SET shift_number=1 WHERE id=?", (shifts[1],))
+        con.execute("UPDATE output_shifts SET shift_number=2 WHERE id=?", (shifts[0],))
+        con.execute("UPDATE route_trips SET shift_number=2 WHERE id=?", (trips[0],))
+        con.execute("UPDATE route_trips SET shift_number=1 WHERE id IN (?,?)",
+                    (trips[1], trips[2]))
+        con.commit()
+    finally:
+        con.close()
+    response = _patch(client, shifts[0], trips, double)
+    assert response.status_code == 200, response.text
+    con = db.connect()
+    try:
+        rows = con.execute("SELECT id,shift_number FROM output_shifts "
+                           "WHERE route_id=? ORDER BY start_sec", (route_id,)).fetchall()
+        assert [tuple(row) for row in rows] == [(shifts[0], 1), (shifts[1], 2)]
+        links = con.execute("SELECT shift_number,output_shift_id FROM route_trips "
+                            "WHERE route_id=? ORDER BY trip_number", (route_id,)).fetchall()
+        assert [tuple(row) for row in links] == [
+            (1, shifts[0]), (1, shifts[0]), (2, shifts[1])
+        ]
+    finally:
+        con.close()

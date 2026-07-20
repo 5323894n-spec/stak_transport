@@ -927,7 +927,6 @@ def route_shift_generation_apply(route_id: int, payload: dict = Body(...),
         raise HTTPException(400, "Укажите тип дня и токен preview")
     con = db.connect()
     try:
-        con.execute("BEGIN IMMEDIATE")
         _route_or_404(con, route_id)
         preview = db.one(con.execute(
             "SELECT * FROM shift_generation_previews WHERE token=?",
@@ -1099,6 +1098,7 @@ def output_shift_manual_update(shift_id: int, payload: dict = Body(...),
         raise HTTPException(400, "Укажите причину ручного изменения")
     con = db.connect()
     try:
+        con.execute("BEGIN IMMEDIATE")
         selected = db.one(con.execute("SELECT * FROM output_shifts WHERE id=?",
                                       (shift_id,)))
         if not selected:
@@ -1120,12 +1120,22 @@ def output_shift_manual_update(shift_id: int, payload: dict = Body(...),
             trips, before, shift_id=shift_id, trip_from_id=trip_from_id,
             trip_to_id=trip_to_id, shift_type=shift_type,
         )
+        settings = _settings_payload(
+            con, selected["route_id"], selected["day_type"]
+        )
+        _apply_manual_handover(plan, settings["handover_min"])
         edited = next(row for row in plan if int(row["id"]) == shift_id)
         if (int(edited["end_sec"]) - int(edited["start_sec"]) >
                 int(shift_type["max_duration_min"]) * 60):
             raise ValueError("Длительность смены превышает максимум выбранного типа")
         _validate_changed_shift_constraints(con, before, plan)
         timestamp = datetime.datetime.now().isoformat(timespec="seconds")
+        con.execute(
+            "UPDATE output_shifts SET shift_number=-id WHERE route_id=? "
+            "AND day_type=? AND output_number=?",
+            (selected["route_id"], selected["day_type"],
+             selected["output_number"]),
+        )
         for row in plan:
             manual = int(row["id"]) == shift_id
             con.execute(
@@ -1151,6 +1161,11 @@ def output_shift_manual_update(shift_id: int, payload: dict = Body(...),
         con.commit()
         return {"shift": next(row for row in persisted if row["id"] == shift_id),
                 "shifts": persisted}
+    except sqlite3.OperationalError as exc:
+        con.rollback()
+        if _sqlite_busy(exc):
+            raise HTTPException(409, "База данных занята, повторите операцию")
+        raise
     except HTTPException:
         con.rollback()
         raise
@@ -1210,6 +1225,7 @@ def output_shifts_reset_manual(route_id: int, payload: dict = Body(...),
         raise HTTPException(400, "Укажите только shift_id или output_number")
     con = db.connect()
     try:
+        con.execute("BEGIN IMMEDIATE")
         _route_or_404(con, route_id)
         if shift_id not in (None, ""):
             try:
@@ -1249,6 +1265,11 @@ def output_shifts_reset_manual(route_id: int, payload: dict = Body(...),
         con.commit()
         return {"route_id": route_id, "day_type": day_type,
                 "output_numbers": outputs, "shifts": after}
+    except sqlite3.OperationalError as exc:
+        con.rollback()
+        if _sqlite_busy(exc):
+            raise HTTPException(409, "База данных занята, повторите операцию")
+        raise
     except HTTPException:
         con.rollback(); raise
     except (KeyError, TypeError, ValueError, sqlite3.IntegrityError) as exc:
@@ -1292,3 +1313,19 @@ def _validate_changed_shift_constraints(con, before, proposed):
             raise ValueError(
                 "Длительность изменённой смены превышает максимум её типа"
             )
+
+
+def _sqlite_busy(exc):
+    message = str(exc).lower()
+    return "locked" in message or "busy" in message
+
+
+def _apply_manual_handover(plan, handover_min):
+    required_seconds = int(handover_min) * 60
+    for previous, current in zip(plan, plan[1:]):
+        gap_seconds = int(current["start_sec"]) - int(previous["end_sec"])
+        if gap_seconds < required_seconds:
+            raise ValueError("Недостаточное время пересмены между сменами")
+        previous["handover_after_min"] = gap_seconds // 60
+    if plan:
+        plan[-1]["handover_after_min"] = 0
