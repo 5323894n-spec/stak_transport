@@ -328,6 +328,82 @@ def _plan_conflict(output_number, exc, code="generation_failed"):
     }
 
 
+class LockedPlanChanged(ValueError):
+    pass
+
+
+def _shift_type_for_output(settings, output_trips):
+    duration = output_trips[-1]["arr_sec"] - output_trips[0]["dep_sec"]
+    long_type = settings.get("long_shift_type")
+    if (
+        duration >= int(settings["long_run_threshold_min"]) * 60
+        and long_type
+        and long_type.get("active")
+    ):
+        return long_type
+    return settings["default_shift_type"]
+
+
+def _build_around_locked(output_trips, locked, *, shift_type, handover_min):
+    conflicts = [
+        conflict
+        for conflict in validate_output_shift_plan(output_trips, locked)
+        if conflict["code"] != "uncovered_trip"
+    ]
+    if conflicts:
+        raise ValueError(
+            "Заблокированные смены нельзя совместить с рейсами выпуска"
+        )
+    positions = {
+        int(trip["id"]): index for index, trip in enumerate(output_trips)
+    }
+    ranges = sorted(
+        (
+            positions[int(shift["trip_from_id"])],
+            positions[int(shift["trip_to_id"])],
+        )
+        for shift in locked
+    )
+    generated = []
+    start = 0
+    for first, last in ranges:
+        if start < first:
+            generated.extend(build_output_shifts(
+                output_trips[start:first],
+                shift_type=shift_type,
+                handover_min=handover_min,
+            ))
+        start = last + 1
+    if start < len(output_trips):
+        generated.extend(build_output_shifts(
+            output_trips[start:],
+            shift_type=shift_type,
+            handover_min=handover_min,
+        ))
+
+    used_numbers = {int(shift["shift_number"]) for shift in locked}
+    next_number = 1
+    for shift in sorted(generated, key=lambda item: (item["start_sec"], item["end_sec"])):
+        while next_number in used_numbers:
+            next_number += 1
+        shift["shift_number"] = next_number
+        used_numbers.add(next_number)
+        next_number += 1
+    combined = sorted(
+        [*locked, *generated],
+        key=lambda item: (item["start_sec"], item["end_sec"], item["shift_number"]),
+    )
+    if validate_output_shift_plan(output_trips, combined):
+        raise ValueError("План с заблокированными сменами не покрывает выпуск")
+    handover_sec = int(handover_min) * 60
+    for previous, current in zip(combined, combined[1:]):
+        if int(current["start_sec"]) - int(previous["end_sec"]) < handover_sec:
+            raise ValueError(
+                "Нет допустимого времени пересмены рядом с заблокированной сменой"
+            )
+    return combined
+
+
 @router.post("/routes/{route_id}/shift-generation/preview")
 def route_shift_generation_preview(route_id: int, payload: dict = Body(...),
                                    user=Depends(current_user)):
@@ -343,8 +419,6 @@ def route_shift_generation_preview(route_id: int, payload: dict = Body(...),
         if not trips:
             raise HTTPException(400, "Для маршрута и типа дня нет рейсов")
         settings = _settings_payload(con, route_id, day_type)
-        default_type = settings["default_shift_type"]
-        long_type = settings.get("long_shift_type")
         by_output = defaultdict(list)
         for trip in trips:
             by_output[int(trip["output_number"])].append(trip)
@@ -367,34 +441,33 @@ def route_shift_generation_preview(route_id: int, payload: dict = Body(...),
             shifts = []
             output_conflicts = []
             if locked:
-                locked_conflicts = validate_output_shift_plan(output_trips, locked)
                 if not preserve_locked:
                     output_conflicts.append(_plan_conflict(
                         output_number,
                         "Выпуск содержит заблокированные ручные смены",
                         "locked_shifts_present",
                     ))
-                elif locked_conflicts:
-                    output_conflicts.append(_plan_conflict(
-                        output_number,
-                        "Заблокированные смены нельзя совместить с рейсами выпуска",
-                        "locked_shift_conflict",
-                    ))
                 else:
-                    shifts = locked
+                    try:
+                        shifts = _build_around_locked(
+                            output_trips,
+                            locked,
+                            shift_type=_shift_type_for_output(
+                                settings, output_trips
+                            ),
+                            handover_min=settings["handover_min"],
+                        )
+                    except ValueError as exc:
+                        output_conflicts.append(_plan_conflict(
+                            output_number, exc, "locked_shift_conflict"
+                        ))
             else:
-                duration = output_trips[-1]["arr_sec"] - output_trips[0]["dep_sec"]
-                shift_type = default_type
-                if (
-                    duration > int(settings["long_run_threshold_min"]) * 60
-                    and long_type
-                    and long_type.get("active")
-                ):
-                    shift_type = long_type
                 try:
                     shifts = build_output_shifts(
                         output_trips,
-                        shift_type=shift_type,
+                        shift_type=_shift_type_for_output(
+                            settings, output_trips
+                        ),
                         handover_min=settings["handover_min"],
                     )
                 except ValueError as exc:
@@ -423,12 +496,21 @@ def route_shift_generation_preview(route_id: int, payload: dict = Body(...),
         now = datetime.datetime.now()
         expires_at = now + datetime.timedelta(minutes=30)
         plan = {
+            "scope": {
+                "route_id": route_id,
+                "day_type": day_type,
+                "username": user["username"],
+            },
             "route_id": route_id,
             "day_type": day_type,
             "preserve_locked": preserve_locked,
             "outputs": outputs,
             "conflicts": conflicts,
             "diff": diff,
+            "locked_shifts": sorted(
+                (_locked_shift_payload(row) for row in locked_rows),
+                key=lambda item: item["id"],
+            ),
         }
         con.execute(
             "INSERT INTO shift_generation_previews("
@@ -461,6 +543,52 @@ def _validated_stored_plan(con, preview, route_id, day_type):
         raise ValueError("План смен не соответствует маршруту или типу дня")
     if plan.get("conflicts"):
         raise ValueError("План смен содержит конфликты")
+    scope = plan.get("scope")
+    if scope and scope != {
+        "route_id": route_id,
+        "day_type": day_type,
+        "username": preview["username"],
+    }:
+        raise ValueError("Scope сохранённого плана был изменён")
+
+    preview_locked = plan.get("locked_shifts")
+    if preview_locked is None:
+        preview_locked = [
+            shift
+            for output in plan.get("outputs", [])
+            for shift in output.get("shifts", [])
+            if shift.get("is_manual_locked")
+        ]
+    try:
+        preview_locked = sorted(preview_locked, key=lambda item: int(item["id"]))
+    except (TypeError, KeyError, ValueError):
+        raise ValueError("Повреждён снимок заблокированных смен")
+    current_locked = sorted(
+        (
+            _locked_shift_payload(row)
+            for row in db.rows(con.execute(
+                "SELECT * FROM output_shifts WHERE route_id=? AND day_type=? "
+                "AND is_manual_locked=1 ORDER BY id",
+                (route_id, day_type),
+            ))
+        ),
+        key=lambda item: item["id"],
+    )
+    if preview_locked != current_locked:
+        raise LockedPlanChanged(
+            "Набор заблокированных смен изменился после preview"
+        )
+    output_locked = sorted(
+        (
+            shift
+            for output in plan.get("outputs", [])
+            for shift in output.get("shifts", [])
+            if shift.get("is_manual_locked")
+        ),
+        key=lambda item: int(item["id"]),
+    )
+    if output_locked != preview_locked:
+        raise LockedPlanChanged("Заблокированные смены исключены из плана")
 
     trips = _generation_trips(con, route_id, day_type)
     by_output = defaultdict(list)
@@ -501,6 +629,48 @@ def _validated_stored_plan(con, preview, route_id, day_type):
     if planned_numbers != set(by_output):
         raise ValueError("План смен покрывает не все выпуски")
     return plan, by_output
+
+
+def _validate_persisted_scope(con, route_id, day_type, by_output):
+    shift_rows = db.rows(con.execute(
+        "SELECT * FROM output_shifts WHERE route_id=? AND day_type=? "
+        "ORDER BY output_number,start_sec,id",
+        (route_id, day_type),
+    ))
+    shifts_by_output = defaultdict(list)
+    for row in shift_rows:
+        shifts_by_output[int(row["output_number"])].append(dict(row))
+    if set(shifts_by_output) != set(by_output):
+        raise ValueError("Сохранённые смены не соответствуют выпускам")
+
+    expected_links = {}
+    for output_number, trips in by_output.items():
+        shifts = shifts_by_output[output_number]
+        if validate_output_shift_plan(trips, shifts):
+            raise ValueError("Сохранённые смены пересекаются или не покрывают выпуск")
+        positions = {int(trip["id"]): index for index, trip in enumerate(trips)}
+        for shift in shifts:
+            first = positions[int(shift["trip_from_id"])]
+            last = positions[int(shift["trip_to_id"])]
+            for trip in trips[first:last + 1]:
+                trip_id = int(trip["id"])
+                if trip_id in expected_links:
+                    raise ValueError("Рейс связан с пересекающимися сменами")
+                expected_links[trip_id] = (
+                    int(shift["id"]), int(shift["shift_number"])
+                )
+    actual = db.rows(con.execute(
+        "SELECT id,output_shift_id,shift_number FROM route_trips "
+        "WHERE route_id=? AND day_type=?",
+        (route_id, day_type),
+    ))
+    if len(actual) != len(expected_links):
+        raise ValueError("Не все рейсы покрыты сохранёнными сменами")
+    for trip in actual:
+        if expected_links.get(int(trip["id"])) != (
+            trip["output_shift_id"], int(trip["shift_number"])
+        ):
+            raise ValueError("Рейс связан с неправильной сменой")
 
 
 @router.post("/routes/{route_id}/shift-generation/apply")
@@ -612,6 +782,7 @@ def route_shift_generation_apply(route_id: int, payload: dict = Body(...),
         ).fetchone()[0]
         if invalid:
             raise ValueError("Не все рейсы связаны ровно с одной допустимой сменой")
+        _validate_persisted_scope(con, route_id, day_type, by_output)
         con.execute(
             "UPDATE shift_generation_previews SET applied_at=? WHERE token=? "
             "AND applied_at IS NULL",
@@ -633,6 +804,9 @@ def route_shift_generation_apply(route_id: int, payload: dict = Body(...),
     except HTTPException:
         con.rollback()
         raise
+    except LockedPlanChanged as exc:
+        con.rollback()
+        raise HTTPException(409, str(exc))
     except (ValueError, TypeError, KeyError, sqlite3.IntegrityError) as exc:
         con.rollback()
         raise HTTPException(400, str(exc) or "Не удалось применить план смен")
