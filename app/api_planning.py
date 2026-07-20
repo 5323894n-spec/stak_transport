@@ -607,11 +607,18 @@ def _assignment_metrics(trips, start_time=None, end_time=None, break_min=None):
     }
 
 
-def _assignment_trips(con, route_id, day_type, output_number, shift_number, trip_from=0, trip_to=0):
+def _assignment_trips(con, route_id, day_type, output_number, shift_number,
+                      trip_from=0, trip_to=0, output_shift_id=None):
+    sql = (
+        "SELECT * FROM route_trips WHERE route_id=? AND day_type=? "
+        "AND output_number=? AND shift_number=?"
+    )
+    args = [route_id, day_type, output_number, shift_number]
+    if output_shift_id is not None:
+        sql += " AND output_shift_id=?"
+        args.append(output_shift_id)
     trips = db.rows(con.execute(
-        "SELECT * FROM route_trips WHERE route_id=? AND day_type=? AND output_number=? AND shift_number=? "
-        "ORDER BY trip_number, dep_time, id",
-        (route_id, day_type, output_number, shift_number)))
+        sql + " ORDER BY trip_number, dep_time, id", args))
     if trip_from:
         trips = [t for t in trips if (t.get("trip_number") or 0) >= trip_from]
     if trip_to:
@@ -629,10 +636,44 @@ def roster_schedule_options(route_id: int, date: str, output_number: int = 0, sh
             raise HTTPException(404, "Маршрут не найден")
         day_type = sched_day_type(con, date)
         outputs = outputs_summary(con, route_id, day_type)
+        structural = db.rows(con.execute(
+            """
+            SELECT os.id AS output_shift_id, os.output_number, os.shift_number,
+                   os.shift_type_id, st.code AS shift_type_code,
+                   st.name AS shift_type_name, st.color AS shift_type_color,
+                   os.start_sec, os.end_sec, os.trip_from_id, os.trip_to_id,
+                   os.driver_slots, COUNT(ra.id) AS assignment_count
+            FROM output_shifts os
+            JOIN shift_types st ON st.id=os.shift_type_id
+            LEFT JOIN roster_assignments ra
+              ON ra.output_shift_id=os.id AND ra.date=?
+            WHERE os.route_id=? AND os.day_type=?
+            GROUP BY os.id
+            """,
+            (date, route_id, day_type),
+        ))
+        structural_by_slot = {
+            (item["output_number"], item["shift_number"]): item
+            for item in structural
+        }
+        for item in outputs:
+            shift = structural_by_slot.get(
+                (item["output_number"], item["shift_number"])
+            )
+            if shift:
+                item.update(shift)
+                item["available_driver_slots"] = max(
+                    0, int(item["driver_slots"]) - int(item["assignment_count"])
+                )
         trips = []
         suggestion = _assignment_metrics([])
         if output_number and shift_number:
-            trips = _assignment_trips(con, route_id, day_type, output_number, shift_number, trip_from, trip_to)
+            selected_structural = structural_by_slot.get((output_number, shift_number))
+            trips = _assignment_trips(
+                con, route_id, day_type, output_number, shift_number,
+                trip_from, trip_to,
+                selected_structural["output_shift_id"] if selected_structural else None,
+            )
             suggestion = _assignment_metrics(trips)
         return {"day_type": day_type, "outputs": outputs, "trips": trips, "suggestion": suggestion}
     finally:
@@ -791,6 +832,7 @@ def roster_assignment_save(payload: dict = Body(...), user=Depends(current_user)
         route_id = int(payload["route_id"])
         output_number = int(payload.get("output_number") or 1)
         shift_number = int(payload.get("shift_number") or 1)
+        output_shift_id = int(payload["output_shift_id"]) if payload.get("output_shift_id") is not None else None
         trip_from = int(payload.get("trip_from") or 0) or None
         trip_to = int(payload.get("trip_to") or 0) or None
         if not db.one(con.execute("SELECT id FROM drivers WHERE id=?", (driver_id,))):
@@ -798,7 +840,34 @@ def roster_assignment_save(payload: dict = Body(...), user=Depends(current_user)
         if not db.one(con.execute("SELECT id FROM routes WHERE id=?", (route_id,))):
             raise HTTPException(404, "Маршрут не найден")
         day_type = payload.get("day_type") or sched_day_type(con, date)
-        trips = _assignment_trips(con, route_id, day_type, output_number, shift_number, trip_from or 0, trip_to or 0)
+        structural_shift = None
+        if output_shift_id is not None:
+            structural_shift = db.one(con.execute(
+                "SELECT * FROM output_shifts WHERE id=?", (output_shift_id,)
+            ))
+            if not structural_shift:
+                raise HTTPException(404, "Структурная смена не найдена")
+            actual_scope = (
+                structural_shift["route_id"], structural_shift["day_type"],
+                structural_shift["output_number"], structural_shift["shift_number"],
+            )
+            requested_scope = (route_id, day_type, output_number, shift_number)
+            if actual_scope != requested_scope:
+                raise HTTPException(
+                    400, "Структурная смена не соответствует маршруту, типу дня, выходу или номеру смены"
+                )
+            assignment_id = int(payload.get("id") or 0)
+            occupied = con.execute(
+                "SELECT COUNT(*) FROM roster_assignments "
+                "WHERE output_shift_id=? AND date=? AND id<>?",
+                (output_shift_id, date, assignment_id),
+            ).fetchone()[0]
+            if occupied >= int(structural_shift["driver_slots"]):
+                raise HTTPException(409, "В структурной смене нет свободных мест для водителя")
+        trips = _assignment_trips(
+            con, route_id, day_type, output_number, shift_number,
+            trip_from or 0, trip_to or 0, output_shift_id,
+        )
         if not trips and not (payload.get("start_time") and payload.get("end_time")):
             raise HTTPException(400, "В расписании не найдены рейсы для выбранного выхода и смены")
         metrics = _assignment_metrics(
@@ -806,11 +875,26 @@ def roster_assignment_save(payload: dict = Body(...), user=Depends(current_user)
             payload.get("start_time") or None,
             payload.get("end_time") or None,
             payload.get("break_min") if "break_min" in payload else None)
-        fields = ["driver_id", "date", "route_id", "day_type", "output_number", "shift_number", "trip_from", "trip_to",
+        if structural_shift:
+            range_start = int(structural_shift["start_sec"])
+            range_end = int(structural_shift["end_sec"])
+            base_day = (range_start // 86400) * 86400
+            actual_start = N.tmin(metrics["start_time"]) * 60 + base_day
+            if actual_start < range_start and range_end > base_day + 86400:
+                actual_start += 86400
+            actual_end = N.tmin(metrics["end_time"]) * 60 + base_day
+            while actual_end <= actual_start:
+                actual_end += 86400
+            if actual_start < range_start or actual_end > range_end:
+                raise HTTPException(
+                    400, "Время назначения выходит за границы структурной смены"
+                )
+        fields = ["driver_id", "date", "route_id", "day_type", "output_number", "shift_number", "output_shift_id", "trip_from", "trip_to",
                   "start_time", "end_time", "hours", "night_hours", "break_min", "distance_km", "trips_count", "comment"]
         rec = {
             "driver_id": driver_id, "date": date, "route_id": route_id, "day_type": day_type,
             "output_number": output_number, "shift_number": shift_number,
+            "output_shift_id": output_shift_id,
             "trip_from": trip_from or metrics.get("trip_from"), "trip_to": trip_to or metrics.get("trip_to"),
             "start_time": metrics["start_time"], "end_time": metrics["end_time"],
             "hours": metrics["hours"], "night_hours": metrics["night_hours"], "break_min": metrics["break_min"],
