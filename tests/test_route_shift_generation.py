@@ -262,6 +262,10 @@ def test_preview_generates_around_partial_locked_shift(client, route_id):
     assert len(shifts) == 3
     assert sum(bool(shift.get("is_manual_locked")) for shift in shifts) == 1
     assert len({shift["shift_number"] for shift in shifts}) == 3
+    predecessor = next(
+        shift for shift in shifts if shift["trip_from_id"] == first
+    )
+    assert predecessor["handover_after_min"] == 10
 
     applied = apply(client, route_id, data["preview_token"])
     assert applied.status_code == 200, applied.text
@@ -546,3 +550,146 @@ def test_post_mutation_integrity_error_rolls_back_shifts_and_links(client, route
         ).fetchone()[0] is None
     finally:
         con.close()
+
+
+def _existing_shift_preview(client, route_id):
+    import app.db as db
+
+    con = db.connect()
+    try:
+        first = add_trip(con, route_id, 1, 1, "06:00", "07:00", 7)
+        last = add_trip(con, route_id, 1, 2, "07:10", "08:00", 7)
+        shift_type_id = con.execute(
+            "SELECT id FROM shift_types WHERE code='single_8h'"
+        ).fetchone()[0]
+        old_shift = con.execute(
+            """
+            INSERT INTO output_shifts(
+              route_id,day_type,output_number,shift_number,shift_type_id,
+              trip_from_id,trip_to_id,start_sec,end_sec,driver_slots,
+              created_at,updated_at
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,datetime('now'),datetime('now'))
+            """,
+            (route_id, DAY, 1, 7, shift_type_id, first, last,
+             21600, 28800, 1),
+        ).lastrowid
+        con.execute(
+            "UPDATE route_trips SET output_shift_id=? WHERE id IN (?,?)",
+            (old_shift, first, last),
+        )
+        con.commit()
+    finally:
+        con.close()
+    token = preview(client, route_id).json()["preview_token"]
+    return token, old_shift, shift_type_id
+
+
+def _assert_old_scope_unchanged(token, old_shift):
+    import app.db as db
+
+    con = db.connect()
+    try:
+        shifts = con.execute(
+            "SELECT id,shift_number FROM output_shifts ORDER BY id"
+        ).fetchall()
+        assert [(row["id"], row["shift_number"]) for row in shifts] == [
+            (old_shift, 7)
+        ]
+        trips = con.execute(
+            "SELECT shift_number,output_shift_id FROM route_trips ORDER BY id"
+        ).fetchall()
+        assert [(row["shift_number"], row["output_shift_id"]) for row in trips] == [
+            (7, old_shift), (7, old_shift)
+        ]
+        assert con.execute(
+            "SELECT applied_at FROM shift_generation_previews WHERE token=?",
+            (token,),
+        ).fetchone()[0] is None
+    finally:
+        con.close()
+
+
+@pytest.mark.parametrize(
+    "corruption",
+    ["top_list", "null_output", "null_shift", "null_locked", "huge_integer"],
+)
+def test_malformed_preview_json_returns_400_without_writes(
+    client, route_id, corruption
+):
+    import app.db as db
+    from app.main import app
+
+    token, old_shift, _ = _existing_shift_preview(client, route_id)
+    con = db.connect()
+    try:
+        raw = con.execute(
+            "SELECT payload_json FROM shift_generation_previews WHERE token=?",
+            (token,),
+        ).fetchone()[0]
+        if corruption == "top_list":
+            raw = "[]"
+        else:
+            plan = json.loads(raw)
+            if corruption == "null_output":
+                plan["outputs"] = [None]
+            elif corruption == "null_shift":
+                plan["outputs"][0]["shifts"] = [None]
+            elif corruption == "null_locked":
+                plan["locked_shifts"] = [None]
+            else:
+                plan["outputs"][0]["shifts"][0]["shift_number"] = 10 ** 100
+            raw = json.dumps(plan)
+        con.execute(
+            "UPDATE shift_generation_previews SET payload_json=? WHERE token=?",
+            (raw, token),
+        )
+        con.commit()
+    finally:
+        con.close()
+
+    safe_client = TestClient(app, raise_server_exceptions=False)
+    safe_client.headers.update({
+        "Authorization": client.headers["Authorization"]
+    })
+    response = apply(safe_client, route_id, token)
+    assert response.status_code == 400, response.text
+    _assert_old_scope_unchanged(token, old_shift)
+
+
+@pytest.mark.parametrize("state_change", ["type_max", "handover", "auto_split"])
+def test_apply_rejects_stale_shift_generation_state(
+    client, route_id, state_change
+):
+    import app.db as db
+
+    token, old_shift, shift_type_id = _existing_shift_preview(client, route_id)
+    con = db.connect()
+    try:
+        if state_change == "type_max":
+            con.execute(
+                "UPDATE shift_types SET planned_duration_min=30,max_duration_min=30 "
+                "WHERE id=?",
+                (shift_type_id,),
+            )
+        else:
+            long_type_id = con.execute(
+                "SELECT id FROM shift_types WHERE code='two_driver_long'"
+            ).fetchone()[0]
+            con.execute(
+                """
+                INSERT INTO route_shift_settings(
+                  route_id,day_type,default_shift_type_id,long_shift_type_id,
+                  handover_min,long_run_threshold_min,auto_split,updated_at
+                ) VALUES(?,?,?,?,?,?,?,datetime('now'))
+                """,
+                (route_id, DAY, shift_type_id, long_type_id,
+                 15 if state_change == "handover" else 10,
+                 720, 0 if state_change == "auto_split" else 1),
+            )
+        con.commit()
+    finally:
+        con.close()
+
+    response = apply(client, route_id, token)
+    assert response.status_code == 409, response.text
+    _assert_old_scope_unchanged(token, old_shift)

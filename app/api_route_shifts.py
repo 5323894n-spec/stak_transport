@@ -332,6 +332,10 @@ class LockedPlanChanged(ValueError):
     pass
 
 
+class PreviewStateChanged(ValueError):
+    pass
+
+
 def _shift_type_for_output(settings, output_trips):
     duration = output_trips[-1]["arr_sec"] - output_trips[0]["dep_sec"]
     long_type = settings.get("long_shift_type")
@@ -393,15 +397,46 @@ def _build_around_locked(output_trips, locked, *, shift_type, handover_min):
         [*locked, *generated],
         key=lambda item: (item["start_sec"], item["end_sec"], item["shift_number"]),
     )
-    if validate_output_shift_plan(output_trips, combined):
-        raise ValueError("План с заблокированными сменами не покрывает выпуск")
     handover_sec = int(handover_min) * 60
     for previous, current in zip(combined, combined[1:]):
-        if int(current["start_sec"]) - int(previous["end_sec"]) < handover_sec:
+        gap = int(current["start_sec"]) - int(previous["end_sec"])
+        if gap < handover_sec:
             raise ValueError(
                 "Нет допустимого времени пересмены рядом с заблокированной сменой"
             )
+        if not previous.get("is_manual_locked"):
+            previous["handover_after_min"] = gap // 60
+    if validate_output_shift_plan(output_trips, combined):
+        raise ValueError("План с заблокированными сменами не покрывает выпуск")
     return combined
+
+
+def _generation_state(con, settings, shift_type_ids):
+    types = []
+    for shift_type_id in sorted(set(shift_type_ids)):
+        row = _shift_type_by_id(con, shift_type_id)
+        if not row:
+            raise ValueError("План ссылается на неизвестный тип смены")
+        types.append({
+            "id": int(row["id"]),
+            "active": bool(row["active"]),
+            "planned_duration_min": int(row["planned_duration_min"]),
+            "max_duration_min": int(row["max_duration_min"]),
+            "driver_slots": int(row["driver_slots"]),
+        })
+    return {
+        "settings": {
+            "default_shift_type_id": int(settings["default_shift_type_id"]),
+            "long_shift_type_id": (
+                int(settings["long_shift_type_id"])
+                if settings.get("long_shift_type_id") is not None else None
+            ),
+            "handover_min": int(settings["handover_min"]),
+            "long_run_threshold_min": int(settings["long_run_threshold_min"]),
+            "auto_split": bool(settings["auto_split"]),
+        },
+        "shift_types": types,
+    }
 
 
 @router.post("/routes/{route_id}/shift-generation/preview")
@@ -512,6 +547,11 @@ def route_shift_generation_preview(route_id: int, payload: dict = Body(...),
                 key=lambda item: item["id"],
             ),
         }
+        used_type_ids = {
+            int(shift["shift_type_id"])
+            for output in outputs for shift in output["shifts"]
+        }
+        plan["generation_state"] = _generation_state(con, settings, used_type_ids)
         con.execute(
             "INSERT INTO shift_generation_previews("
             "token,route_id,day_type,username,payload_json,created_at,expires_at"
@@ -534,11 +574,174 @@ def route_shift_generation_preview(route_id: int, payload: dict = Body(...),
         con.close()
 
 
+SQLITE_INT_MAX = 2 ** 63 - 1
+MAX_SERVICE_SECONDS = 7 * 24 * 3600
+
+
+def _required_dict(value, label):
+    if not isinstance(value, dict):
+        raise ValueError(f"{label}: ожидается объект")
+    return value
+
+
+def _required_list(value, label):
+    if not isinstance(value, list):
+        raise ValueError(f"{label}: ожидается список")
+    return value
+
+
+def _required_int(value, label, *, minimum=0, maximum=SQLITE_INT_MAX):
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{label}: ожидается целое число")
+    if value < minimum or value > maximum:
+        raise ValueError(f"{label}: число вне допустимого диапазона")
+    return value
+
+
+def _validate_shift_json(shift, label, *, require_locked=False):
+    shift = _required_dict(shift, label)
+    _required_int(shift.get("shift_number"), f"{label}.shift_number", minimum=1)
+    _required_int(shift.get("shift_type_id"), f"{label}.shift_type_id", minimum=1)
+    _required_int(shift.get("output_number"), f"{label}.output_number", minimum=1)
+    _required_int(shift.get("trip_from_id"), f"{label}.trip_from_id", minimum=1)
+    _required_int(shift.get("trip_to_id"), f"{label}.trip_to_id", minimum=1)
+    start = _required_int(
+        shift.get("start_sec"), f"{label}.start_sec",
+        maximum=MAX_SERVICE_SECONDS,
+    )
+    end = _required_int(
+        shift.get("end_sec"), f"{label}.end_sec",
+        minimum=1, maximum=MAX_SERVICE_SECONDS,
+    )
+    if end <= start:
+        raise ValueError(f"{label}: окончание должно быть позже начала")
+    slots = _required_int(
+        shift.get("driver_slots"), f"{label}.driver_slots", minimum=1,
+        maximum=2,
+    )
+    if slots not in (1, 2):
+        raise ValueError(f"{label}.driver_slots: допустимо 1 или 2")
+    _required_int(
+        shift.get("handover_after_min", 0), f"{label}.handover_after_min",
+        maximum=7 * 24 * 60,
+    )
+    locked = shift.get("is_manual_locked", False)
+    if not isinstance(locked, bool):
+        raise ValueError(f"{label}.is_manual_locked: ожидается boolean")
+    if require_locked and not locked:
+        raise ValueError(f"{label}: ожидается заблокированная смена")
+    if locked:
+        _required_int(shift.get("id"), f"{label}.id", minimum=1)
+    return shift
+
+
+def _validate_generation_state_json(state):
+    state = _required_dict(state, "generation_state")
+    settings = _required_dict(state.get("settings"), "generation_state.settings")
+    _required_int(
+        settings.get("default_shift_type_id"),
+        "generation_state.settings.default_shift_type_id", minimum=1,
+    )
+    long_id = settings.get("long_shift_type_id")
+    if long_id is not None:
+        _required_int(
+            long_id, "generation_state.settings.long_shift_type_id", minimum=1
+        )
+    _required_int(
+        settings.get("handover_min"), "generation_state.settings.handover_min",
+        maximum=7 * 24 * 60,
+    )
+    _required_int(
+        settings.get("long_run_threshold_min"),
+        "generation_state.settings.long_run_threshold_min", minimum=1,
+        maximum=7 * 24 * 60,
+    )
+    if not isinstance(settings.get("auto_split"), bool):
+        raise ValueError("generation_state.settings.auto_split: ожидается boolean")
+    types = _required_list(state.get("shift_types"), "generation_state.shift_types")
+    type_ids = set()
+    for index, item in enumerate(types):
+        label = f"generation_state.shift_types[{index}]"
+        item = _required_dict(item, label)
+        type_id = _required_int(item.get("id"), f"{label}.id", minimum=1)
+        if type_id in type_ids:
+            raise ValueError("generation_state содержит повторный тип смены")
+        type_ids.add(type_id)
+        if not isinstance(item.get("active"), bool):
+            raise ValueError(f"{label}.active: ожидается boolean")
+        planned = _required_int(
+            item.get("planned_duration_min"), f"{label}.planned_duration_min",
+            minimum=1, maximum=7 * 24 * 60,
+        )
+        maximum = _required_int(
+            item.get("max_duration_min"), f"{label}.max_duration_min",
+            minimum=1, maximum=7 * 24 * 60,
+        )
+        if maximum < planned:
+            raise ValueError(f"{label}: max_duration меньше planned_duration")
+        slots = _required_int(
+            item.get("driver_slots"), f"{label}.driver_slots", minimum=1,
+            maximum=2,
+        )
+        if slots not in (1, 2):
+            raise ValueError(f"{label}.driver_slots: допустимо 1 или 2")
+    return type_ids
+
+
+def _validate_plan_json_shape(plan):
+    plan = _required_dict(plan, "payload_json")
+    _required_int(plan.get("route_id"), "route_id", minimum=1)
+    if not isinstance(plan.get("day_type"), str) or not plan["day_type"]:
+        raise ValueError("day_type: ожидается непустая строка")
+    if not isinstance(plan.get("preserve_locked"), bool):
+        raise ValueError("preserve_locked: ожидается boolean")
+    scope = _required_dict(plan.get("scope"), "scope")
+    _required_int(scope.get("route_id"), "scope.route_id", minimum=1)
+    if not isinstance(scope.get("day_type"), str):
+        raise ValueError("scope.day_type: ожидается строка")
+    if not isinstance(scope.get("username"), str) or not scope["username"]:
+        raise ValueError("scope.username: ожидается непустая строка")
+    conflicts = _required_list(plan.get("conflicts"), "conflicts")
+    for index, conflict in enumerate(conflicts):
+        _required_dict(conflict, f"conflicts[{index}]")
+    diff = _required_dict(plan.get("diff"), "diff")
+    for field in (
+        "old_shift_count", "new_shift_count",
+        "old_driver_slots", "new_driver_slots",
+    ):
+        _required_int(diff.get(field), f"diff.{field}")
+    locked = _required_list(plan.get("locked_shifts"), "locked_shifts")
+    for index, shift in enumerate(locked):
+        _validate_shift_json(
+            shift, f"locked_shifts[{index}]", require_locked=True
+        )
+    outputs = _required_list(plan.get("outputs"), "outputs")
+    for output_index, output in enumerate(outputs):
+        label = f"outputs[{output_index}]"
+        output = _required_dict(output, label)
+        _required_int(
+            output.get("output_number"), f"{label}.output_number", minimum=1
+        )
+        output_conflicts = _required_list(
+            output.get("conflicts"), f"{label}.conflicts"
+        )
+        for index, conflict in enumerate(output_conflicts):
+            _required_dict(conflict, f"{label}.conflicts[{index}]")
+        shifts = _required_list(output.get("shifts"), f"{label}.shifts")
+        for shift_index, shift in enumerate(shifts):
+            _validate_shift_json(shift, f"{label}.shifts[{shift_index}]")
+    state_type_ids = _validate_generation_state_json(
+        plan.get("generation_state")
+    )
+    return plan, state_type_ids
+
+
 def _validated_stored_plan(con, preview, route_id, day_type):
     try:
         plan = json.loads(preview["payload_json"])
     except (TypeError, json.JSONDecodeError):
         raise ValueError("Повреждён сохранённый план смен")
+    plan, state_type_ids = _validate_plan_json_shape(plan)
     if plan.get("route_id") != route_id or plan.get("day_type") != day_type:
         raise ValueError("План смен не соответствует маршруту или типу дня")
     if plan.get("conflicts"):
@@ -595,6 +798,7 @@ def _validated_stored_plan(con, preview, route_id, day_type):
     for trip in trips:
         by_output[int(trip["output_number"])].append(trip)
     outputs = plan.get("outputs")
+    used_type_ids = set()
     if not isinstance(outputs, list):
         raise ValueError("Повреждён сохранённый план смен")
     planned_numbers = set()
@@ -611,6 +815,7 @@ def _validated_stored_plan(con, preview, route_id, day_type):
             raise ValueError("План смен не покрывает рейсы выпуска")
         for shift in shifts:
             shift_type = _shift_type_by_id(con, shift.get("shift_type_id"))
+            used_type_ids.add(int(shift["shift_type_id"]))
             if not shift_type:
                 raise ValueError("План ссылается на неизвестный тип смены")
             if int(shift.get("driver_slots", 0)) != int(shift_type["driver_slots"]):
@@ -628,6 +833,32 @@ def _validated_stored_plan(con, preview, route_id, day_type):
                     raise ValueError("Заблокированная смена была изменена")
     if planned_numbers != set(by_output):
         raise ValueError("План смен покрывает не все выпуски")
+    if used_type_ids != state_type_ids:
+        raise ValueError("Набор типов смен в плане не соответствует снимку")
+    settings = _settings_payload(con, route_id, day_type)
+    current_state = _generation_state(con, settings, used_type_ids)
+    if current_state != plan["generation_state"]:
+        raise PreviewStateChanged(
+            "Настройки или типы смен изменились после preview"
+        )
+    types_by_id = {
+        int(item["id"]): item for item in current_state["shift_types"]
+    }
+    handover_sec = int(settings["handover_min"]) * 60
+    for output in outputs:
+        ordered_shifts = sorted(
+            output["shifts"], key=lambda item: (item["start_sec"], item["end_sec"])
+        )
+        for shift in ordered_shifts:
+            duration = int(shift["end_sec"]) - int(shift["start_sec"])
+            shift_type = types_by_id[int(shift["shift_type_id"])]
+            if duration > int(shift_type["max_duration_min"]) * 60:
+                raise ValueError("Длительность смены превышает максимум типа")
+            if not shift_type["active"]:
+                raise ValueError("План использует неактивный тип смены")
+        for previous, current in zip(ordered_shifts, ordered_shifts[1:]):
+            if int(current["start_sec"]) - int(previous["end_sec"]) < handover_sec:
+                raise ValueError("Между сменами недостаточно времени пересмены")
     return plan, by_output
 
 
@@ -807,7 +1038,11 @@ def route_shift_generation_apply(route_id: int, payload: dict = Body(...),
     except LockedPlanChanged as exc:
         con.rollback()
         raise HTTPException(409, str(exc))
-    except (ValueError, TypeError, KeyError, sqlite3.IntegrityError) as exc:
+    except PreviewStateChanged as exc:
+        con.rollback()
+        raise HTTPException(409, str(exc))
+    except (AttributeError, KeyError, OverflowError, TypeError, ValueError,
+            sqlite3.IntegrityError) as exc:
         con.rollback()
         raise HTTPException(400, str(exc) or "Не удалось применить план смен")
     finally:
