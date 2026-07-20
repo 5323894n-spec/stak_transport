@@ -307,7 +307,9 @@ def test_preview_generates_around_partial_locked_shift(client, route_id):
         con.close()
 
 
-@pytest.mark.parametrize("legacy_case", ["inactive", "over_max"])
+@pytest.mark.parametrize(
+    "legacy_case", ["inactive", "over_max", "driver_slots"]
+)
 def test_apply_preserves_legacy_locked_type_constraints(
     client, route_id, legacy_case
 ):
@@ -329,7 +331,8 @@ def test_apply_preserves_legacy_locked_type_constraints(
                 f"legacy_{legacy_case}", "Legacy locked",
                 30 if legacy_case == "over_max" else 60,
                 30 if legacy_case == "over_max" else 120,
-                1, 0 if legacy_case == "inactive" else 1,
+                2 if legacy_case == "driver_slots" else 1,
+                0 if legacy_case == "inactive" else 1,
             ),
         ).lastrowid
         locked_id = con.execute(
@@ -361,11 +364,12 @@ def test_apply_preserves_legacy_locked_type_constraints(
     con = db.connect()
     try:
         locked = con.execute(
-            "SELECT id,shift_type_id,is_manual_locked FROM output_shifts WHERE id=?",
+            "SELECT id,shift_type_id,driver_slots,is_manual_locked "
+            "FROM output_shifts WHERE id=?",
             (locked_id,),
         ).fetchone()
-        assert (locked["id"], locked["shift_type_id"], locked["is_manual_locked"]) == (
-            locked_id, legacy_type_id, 1
+        assert tuple(locked) == (
+            locked_id, legacy_type_id, 1, 1
         )
         links = con.execute(
             "SELECT output_shift_id FROM route_trips WHERE id IN (?,?,?)",

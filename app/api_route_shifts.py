@@ -827,8 +827,6 @@ def _validated_stored_plan(con, preview, route_id, day_type):
             used_type_ids.add(int(shift["shift_type_id"]))
             if not shift_type:
                 raise ValueError("План ссылается на неизвестный тип смены")
-            if int(shift.get("driver_slots", 0)) != int(shift_type["driver_slots"]):
-                raise ValueError("Количество водителей не соответствует типу смены")
             if shift.get("is_manual_locked"):
                 locked = db.one(con.execute(
                     "SELECT * FROM output_shifts WHERE id=? AND route_id=? "
@@ -840,6 +838,10 @@ def _validated_stored_plan(con, preview, route_id, day_type):
                 expected = _locked_shift_payload(locked)
                 if any(expected[key] != shift.get(key) for key in expected):
                     raise ValueError("Заблокированная смена была изменена")
+            elif int(shift["driver_slots"]) != int(shift_type["driver_slots"]):
+                raise ValueError(
+                    "Количество водителей не соответствует типу смены"
+                )
     if planned_numbers != set(by_output):
         raise ValueError("План смен покрывает не все выпуски")
     if used_type_ids != state_type_ids:
