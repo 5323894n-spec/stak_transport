@@ -348,6 +348,12 @@ def _shift_type_for_output(settings, output_trips):
     return settings["default_shift_type"]
 
 
+def _require_active_generated_type(shift_type):
+    if not shift_type.get("active"):
+        raise ValueError("Выбранный тип смены неактивен")
+    return shift_type
+
+
 def _build_around_locked(output_trips, locked, *, shift_type, handover_min):
     conflicts = [
         conflict
@@ -372,6 +378,7 @@ def _build_around_locked(output_trips, locked, *, shift_type, handover_min):
     start = 0
     for first, last in ranges:
         if start < first:
+            _require_active_generated_type(shift_type)
             generated.extend(build_output_shifts(
                 output_trips[start:first],
                 shift_type=shift_type,
@@ -379,6 +386,7 @@ def _build_around_locked(output_trips, locked, *, shift_type, handover_min):
             ))
         start = last + 1
     if start < len(output_trips):
+        _require_active_generated_type(shift_type)
         generated.extend(build_output_shifts(
             output_trips[start:],
             shift_type=shift_type,
@@ -498,11 +506,12 @@ def route_shift_generation_preview(route_id: int, payload: dict = Body(...),
                         ))
             else:
                 try:
+                    shift_type = _require_active_generated_type(
+                        _shift_type_for_output(settings, output_trips)
+                    )
                     shifts = build_output_shifts(
                         output_trips,
-                        shift_type=_shift_type_for_output(
-                            settings, output_trips
-                        ),
+                        shift_type=shift_type,
                         handover_min=settings["handover_min"],
                     )
                 except ValueError as exc:
@@ -850,6 +859,8 @@ def _validated_stored_plan(con, preview, route_id, day_type):
             output["shifts"], key=lambda item: (item["start_sec"], item["end_sec"])
         )
         for shift in ordered_shifts:
+            if shift.get("is_manual_locked"):
+                continue
             duration = int(shift["end_sec"]) - int(shift["start_sec"])
             shift_type = types_by_id[int(shift["shift_type_id"])]
             if duration > int(shift_type["max_duration_min"]) * 60:

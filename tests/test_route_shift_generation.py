@@ -186,6 +186,26 @@ def test_long_output_uses_two_driver_type_and_counts_slots(client, route_id):
     assert data["diff"]["new_driver_slots"] == 2
 
 
+def test_preview_conflicts_for_inactive_generated_default_type(client, route_id):
+    import app.db as db
+
+    con = db.connect()
+    try:
+        add_trip(con, route_id, 1, 1, "06:00", "07:00")
+        con.execute("UPDATE shift_types SET active=0 WHERE code='single_8h'")
+        con.commit()
+    finally:
+        con.close()
+
+    response = preview(client, route_id)
+    assert response.status_code == 200, response.text
+    data = response.json()
+    assert data["outputs"][0]["shifts"] == []
+    assert data["conflicts"][0]["code"] == "generation_failed"
+    assert "неактив" in data["conflicts"][0]["message"].lower()
+    assert apply(client, route_id, data["preview_token"]).status_code == 400
+
+
 def test_apply_is_one_time_and_route_day_user_scope_bound(client, route_id):
     import app.db as db
     from app.auth import hash_password
@@ -278,6 +298,75 @@ def test_preview_generates_around_partial_locked_shift(client, route_id):
         assert con.execute(
             "SELECT is_manual_locked FROM output_shifts WHERE id=?", (locked_id,)
         ).fetchone()[0] == 1
+        links = con.execute(
+            "SELECT output_shift_id FROM route_trips WHERE id IN (?,?,?)",
+            (first, middle, last),
+        ).fetchall()
+        assert all(row[0] is not None for row in links)
+    finally:
+        con.close()
+
+
+@pytest.mark.parametrize("legacy_case", ["inactive", "over_max"])
+def test_apply_preserves_legacy_locked_type_constraints(
+    client, route_id, legacy_case
+):
+    import app.db as db
+
+    con = db.connect()
+    try:
+        first = add_trip(con, route_id, 1, 1, "06:00", "07:00")
+        middle = add_trip(con, route_id, 1, 2, "07:10", "08:10")
+        last = add_trip(con, route_id, 1, 3, "08:20", "09:20")
+        legacy_type_id = con.execute(
+            """
+            INSERT INTO shift_types(
+              code,name,planned_duration_min,max_duration_min,driver_slots,
+              active,created_at,updated_at
+            ) VALUES(?,?,?,?,?,?,datetime('now'),datetime('now'))
+            """,
+            (
+                f"legacy_{legacy_case}", "Legacy locked",
+                30 if legacy_case == "over_max" else 60,
+                30 if legacy_case == "over_max" else 120,
+                1, 0 if legacy_case == "inactive" else 1,
+            ),
+        ).lastrowid
+        locked_id = con.execute(
+            """
+            INSERT INTO output_shifts(
+              route_id,day_type,output_number,shift_number,shift_type_id,
+              trip_from_id,trip_to_id,start_sec,end_sec,driver_slots,
+              is_manual_locked,source,created_at,updated_at
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,1,'manual',datetime('now'),datetime('now'))
+            """,
+            (route_id, DAY, 1, 2, legacy_type_id, middle, middle,
+             25800, 29400, 1),
+        ).lastrowid
+        con.execute(
+            "UPDATE route_trips SET shift_number=2,output_shift_id=? WHERE id=?",
+            (locked_id, middle),
+        )
+        con.commit()
+    finally:
+        con.close()
+
+    response = preview(client, route_id)
+    assert response.status_code == 200, response.text
+    data = response.json()
+    assert data["conflicts"] == []
+    applied = apply(client, route_id, data["preview_token"])
+    assert applied.status_code == 200, applied.text
+
+    con = db.connect()
+    try:
+        locked = con.execute(
+            "SELECT id,shift_type_id,is_manual_locked FROM output_shifts WHERE id=?",
+            (locked_id,),
+        ).fetchone()
+        assert (locked["id"], locked["shift_type_id"], locked["is_manual_locked"]) == (
+            locked_id, legacy_type_id, 1
+        )
         links = con.execute(
             "SELECT output_shift_id FROM route_trips WHERE id IN (?,?,?)",
             (first, middle, last),
