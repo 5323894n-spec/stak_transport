@@ -1130,12 +1130,16 @@ def output_shift_manual_update(shift_id: int, payload: dict = Body(...),
             raise ValueError("Длительность смены превышает максимум выбранного типа")
         _validate_changed_shift_constraints(con, before, plan)
         timestamp = datetime.datetime.now().isoformat(timespec="seconds")
-        con.execute(
-            "UPDATE output_shifts SET shift_number=-id WHERE route_id=? "
-            "AND day_type=? AND output_number=?",
-            (selected["route_id"], selected["day_type"],
-             selected["output_number"]),
-        )
+        temporary_base = min(
+            [0, *(int(row["shift_number"]) for row in before)]
+        ) - len(before) - 1
+        if temporary_base - len(before) < -(2 ** 63):
+            raise ValueError("Невозможно безопасно перенумеровать смены")
+        for index, row in enumerate(before):
+            con.execute(
+                "UPDATE output_shifts SET shift_number=? WHERE id=?",
+                (temporary_base - index, int(row["id"])),
+            )
         for row in plan:
             manual = int(row["id"]) == shift_id
             con.execute(

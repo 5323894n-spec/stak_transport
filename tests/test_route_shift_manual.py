@@ -554,3 +554,44 @@ def test_patch_two_phase_renumbers_legacy_reversed_shifts(client):
         ]
     finally:
         con.close()
+
+
+def test_patch_temp_numbers_avoid_legacy_negative_id_collisions(client):
+    import app.db as db
+
+    route_id, trips, shifts, _, double = _seed_output()
+    first_id, second_id = shifts
+    con = db.connect()
+    try:
+        con.execute("UPDATE output_shifts SET shift_number=-999999 WHERE id=?",
+                    (first_id,))
+        con.execute("UPDATE output_shifts SET shift_number=? WHERE id=?",
+                    (-first_id, second_id))
+        con.execute("UPDATE output_shifts SET shift_number=? WHERE id=?",
+                    (-second_id, first_id))
+        con.execute("UPDATE route_trips SET shift_number=? WHERE id=?",
+                    (-second_id, trips[0]))
+        con.execute("UPDATE route_trips SET shift_number=? WHERE id IN (?,?)",
+                    (-first_id, trips[1], trips[2]))
+        con.commit()
+    finally:
+        con.close()
+
+    response = _patch(client, first_id, trips, double)
+    assert response.status_code == 200, response.text
+    con = db.connect()
+    try:
+        shifts_after = con.execute(
+            "SELECT id,shift_number FROM output_shifts WHERE route_id=? ORDER BY start_sec",
+            (route_id,),
+        ).fetchall()
+        assert [tuple(row) for row in shifts_after] == [(first_id, 1), (second_id, 2)]
+        links = con.execute(
+            "SELECT shift_number,output_shift_id FROM route_trips WHERE route_id=? "
+            "ORDER BY trip_number", (route_id,),
+        ).fetchall()
+        assert [tuple(row) for row in links] == [
+            (1, first_id), (1, first_id), (2, second_id)
+        ]
+    finally:
+        con.close()
