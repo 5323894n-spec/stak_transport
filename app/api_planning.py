@@ -843,7 +843,12 @@ def roster_assignment_save(payload: dict = Body(...), user=Depends(current_user)
         structural_shift = None
         if output_shift_id is not None:
             structural_shift = db.one(con.execute(
-                "SELECT * FROM output_shifts WHERE id=?", (output_shift_id,)
+                "SELECT os.*, first_trip.trip_number AS trip_from_number, "
+                "last_trip.trip_number AS trip_to_number "
+                "FROM output_shifts os "
+                "JOIN route_trips first_trip ON first_trip.id=os.trip_from_id "
+                "JOIN route_trips last_trip ON last_trip.id=os.trip_to_id "
+                "WHERE os.id=?", (output_shift_id,)
             ))
             if not structural_shift:
                 raise HTTPException(404, "Структурная смена не найдена")
@@ -856,13 +861,30 @@ def roster_assignment_save(payload: dict = Body(...), user=Depends(current_user)
                 raise HTTPException(
                     400, "Структурная смена не соответствует маршруту, типу дня, выходу или номеру смены"
                 )
+            if (trip_from is None) != (trip_to is None):
+                raise HTTPException(
+                    400, "Для структурной смены укажите обе границы рейсов или не указывайте их"
+                )
+            if trip_from is not None and (
+                trip_from != int(structural_shift["trip_from_number"])
+                or trip_to != int(structural_shift["trip_to_number"])
+            ):
+                raise HTTPException(
+                    400, "Границы рейсов назначения не соответствуют границам структурной смены"
+                )
             assignment_id = int(payload.get("id") or 0)
-            occupied = con.execute(
-                "SELECT COUNT(*) FROM roster_assignments "
+            occupancy = con.execute(
+                "SELECT COUNT(*) AS occupied, "
+                "SUM(CASE WHEN driver_id=? THEN 1 ELSE 0 END) AS same_driver "
+                "FROM roster_assignments "
                 "WHERE output_shift_id=? AND date=? AND id<>?",
-                (output_shift_id, date, assignment_id),
-            ).fetchone()[0]
-            if occupied >= int(structural_shift["driver_slots"]):
+                (driver_id, output_shift_id, date, assignment_id),
+            ).fetchone()
+            if int(occupancy["same_driver"] or 0):
+                raise HTTPException(
+                    400, "Водитель уже назначен на эту структурную смену"
+                )
+            if int(occupancy["occupied"]) >= int(structural_shift["driver_slots"]):
                 raise HTTPException(409, "В структурной смене нет свободных мест для водителя")
         trips = _assignment_trips(
             con, route_id, day_type, output_number, shift_number,

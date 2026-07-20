@@ -401,3 +401,133 @@ def test_scope_mismatch_update_rolls_back_existing_assignment(tmp_path):
         assert tuple(row) == (1, "", seeded["output_shift_id"])
     finally:
         con.close()
+
+
+def test_two_driver_shift_rejects_duplicate_driver(tmp_path):
+    import app.db as db
+
+    client = make_client(tmp_path)
+    seeded = seed_structural_shift(driver_slots=2)
+    driver_id = create_driver("duplicate")
+
+    first = client.post(
+        "/api/roster/assignment", json=assignment_payload(driver_id, seeded)
+    )
+    duplicate = client.post(
+        "/api/roster/assignment", json=assignment_payload(driver_id, seeded)
+    )
+
+    assert first.status_code == 200, first.text
+    assert duplicate.status_code == 400, duplicate.text
+    assert "водител" in duplicate.json()["detail"].lower()
+    con = db.connect()
+    try:
+        assert con.execute(
+            """
+            SELECT COUNT(*) FROM roster_assignments
+            WHERE date=? AND output_shift_id=? AND driver_id=?
+            """,
+            (DATE, seeded["output_shift_id"], driver_id),
+        ).fetchone()[0] == 1
+        assert con.execute(
+            """
+            SELECT COUNT(*) FROM audit_log
+            WHERE object_type='roster_assignments'
+              AND action='создание назначения графика'
+            """
+        ).fetchone()[0] == 1
+    finally:
+        con.close()
+
+
+def test_linked_assignment_rejects_non_structural_trip_boundaries_without_audit(tmp_path):
+    import app.db as db
+
+    client = make_client(tmp_path)
+    seeded = seed_structural_shift(driver_slots=2)
+    driver_id = create_driver("bad-boundaries")
+
+    response = client.post(
+        "/api/roster/assignment",
+        json=assignment_payload(
+            driver_id,
+            seeded,
+            trip_from=99,
+            trip_to=100,
+            start_time="06:00",
+            end_time="13:30",
+        ),
+    )
+
+    assert response.status_code == 400, response.text
+    assert "границ" in response.json()["detail"].lower()
+    con = db.connect()
+    try:
+        assert con.execute(
+            "SELECT COUNT(*) FROM roster_assignments WHERE driver_id=?",
+            (driver_id,),
+        ).fetchone()[0] == 0
+        assert con.execute(
+            """
+            SELECT COUNT(*) FROM audit_log
+            WHERE object_type='roster_assignments'
+              AND action IN ('создание назначения графика','изменение назначения графика')
+            """
+        ).fetchone()[0] == 0
+    finally:
+        con.close()
+
+
+def test_linked_assignment_rejects_only_one_trip_boundary(tmp_path):
+    client = make_client(tmp_path)
+    seeded = seed_structural_shift(driver_slots=2)
+    driver_id = create_driver("partial-boundary")
+    payload = assignment_payload(driver_id, seeded)
+    payload.pop("trip_to")
+
+    response = client.post("/api/roster/assignment", json=payload)
+
+    assert response.status_code == 400, response.text
+    assert "обе границы" in response.json()["detail"].lower()
+
+
+def test_update_rejects_driver_already_assigned_to_structural_shift(tmp_path):
+    import app.db as db
+
+    client = make_client(tmp_path)
+    seeded = seed_structural_shift(driver_slots=2)
+    first_driver = create_driver("update-duplicate-1")
+    second_driver = create_driver("update-duplicate-2")
+    first = client.post(
+        "/api/roster/assignment",
+        json=assignment_payload(first_driver, seeded),
+    )
+    second = client.post(
+        "/api/roster/assignment",
+        json=assignment_payload(second_driver, seeded),
+    )
+    assert first.status_code == 200, first.text
+    assert second.status_code == 200, second.text
+    second_id = second.json()["assignment"]["id"]
+
+    rejected = client.post(
+        "/api/roster/assignment",
+        json=assignment_payload(first_driver, seeded, id=second_id),
+    )
+
+    assert rejected.status_code == 400, rejected.text
+    assert "водител" in rejected.json()["detail"].lower()
+    con = db.connect()
+    try:
+        assert con.execute(
+            "SELECT driver_id FROM roster_assignments WHERE id=?", (second_id,)
+        ).fetchone()[0] == second_driver
+        assert con.execute(
+            """
+            SELECT COUNT(*) FROM audit_log
+            WHERE object_type='roster_assignments'
+              AND action='изменение назначения графика'
+            """
+        ).fetchone()[0] == 0
+    finally:
+        con.close()
