@@ -923,11 +923,13 @@ def roster_assignment_save(payload: dict = Body(...), user=Depends(current_user)
             "distance_km": metrics["distance_km"], "trips_count": metrics["trips_count"],
             "comment": payload.get("comment", ""),
         }
+        old_pair = None
         if payload.get("id"):
             aid = int(payload["id"])
             old = db.one(con.execute("SELECT * FROM roster_assignments WHERE id=?", (aid,)))
             if not old:
                 raise HTTPException(404, "Назначение не найдено")
+            old_pair = (old["driver_id"], old["date"])
             con.execute("UPDATE roster_assignments SET " + ",".join(f + "=?" for f in fields) + " WHERE id=?",
                         [rec[f] for f in fields] + [aid])
             db.audit(con, user["username"], "изменение назначения графика", "roster_assignments", aid, old=old, new=rec)
@@ -936,6 +938,8 @@ def roster_assignment_save(payload: dict = Body(...), user=Depends(current_user)
                               [rec[f] for f in fields])
             aid = cur.lastrowid
             db.audit(con, user["username"], "создание назначения графика", "roster_assignments", aid, new=rec)
+        if old_pair and old_pair != (driver_id, date):
+            _refresh_roster_from_assignments(con, *old_pair)
         _refresh_roster_from_assignments(con, driver_id, date)
         dd = datetime.date.fromisoformat(date)
         vio = [v for v in N.check_period(con, (dd - datetime.timedelta(days=7)).isoformat(),

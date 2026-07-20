@@ -531,3 +531,114 @@ def test_update_rejects_driver_already_assigned_to_structural_shift(tmp_path):
         ).fetchone()[0] == 0
     finally:
         con.close()
+
+
+def test_update_refreshes_old_and_new_driver_date_aggregates(tmp_path):
+    import app.db as db
+
+    client = make_client(tmp_path)
+    seeded = seed_structural_shift(driver_slots=2)
+    old_driver = create_driver("move-old")
+    new_driver = create_driver("move-new")
+    new_date = "2026-07-07"
+    created = client.post(
+        "/api/roster/assignment",
+        json=assignment_payload(old_driver, seeded),
+    )
+    assert created.status_code == 200, created.text
+    assignment_id = created.json()["assignment"]["id"]
+
+    updated = client.post(
+        "/api/roster/assignment",
+        json=assignment_payload(
+            new_driver, seeded, id=assignment_id, date=new_date, comment="moved"
+        ),
+    )
+
+    assert updated.status_code == 200, updated.text
+    con = db.connect()
+    try:
+        assignment = con.execute(
+            "SELECT driver_id,date,comment FROM roster_assignments WHERE id=?",
+            (assignment_id,),
+        ).fetchone()
+        assert tuple(assignment) == (new_driver, new_date, "moved")
+
+        old_roster = con.execute(
+            """
+            SELECT status,route_id,output_number,shift_number,start_time,end_time,
+                   hours,night_hours,break_min,comment
+            FROM roster WHERE driver_id=? AND date=?
+            """,
+            (old_driver, DATE),
+        ).fetchone()
+        assert tuple(old_roster) == (
+            "работа", None, None, None, None, None, 0.0, 0.0, 0, "назначений нет"
+        )
+
+        new_roster = con.execute(
+            """
+            SELECT status,route_id,output_number,shift_number,start_time,end_time,hours
+            FROM roster WHERE driver_id=? AND date=?
+            """,
+            (new_driver, new_date),
+        ).fetchone()
+        assert tuple(new_roster) == (
+            "работа", seeded["route_id"], 1, 1, "06:00", "13:30", 7.0
+        )
+        assert con.execute(
+            """
+            SELECT COUNT(*) FROM audit_log
+            WHERE object_type='roster_assignments'
+              AND action='изменение назначения графика'
+            """
+        ).fetchone()[0] == 1
+    finally:
+        con.close()
+
+
+def test_update_with_same_driver_date_refreshes_one_aggregate(tmp_path):
+    import app.db as db
+
+    client = make_client(tmp_path)
+    seeded = seed_structural_shift(driver_slots=2)
+    driver_id = create_driver("same-pair")
+    created = client.post(
+        "/api/roster/assignment",
+        json=assignment_payload(driver_id, seeded),
+    )
+    assert created.status_code == 200, created.text
+
+    updated = client.post(
+        "/api/roster/assignment",
+        json=assignment_payload(
+            driver_id,
+            seeded,
+            id=created.json()["assignment"]["id"],
+            comment="same pair",
+        ),
+    )
+
+    assert updated.status_code == 200, updated.text
+    con = db.connect()
+    try:
+        roster = con.execute(
+            "SELECT status,route_id,hours,comment FROM roster WHERE driver_id=? AND date=?",
+            (driver_id, DATE),
+        ).fetchone()
+        assert tuple(roster) == (
+            "работа", seeded["route_id"], 7.0, "назначений: 1 (№RS-1 1/1)"
+        )
+        assert con.execute(
+            "SELECT COUNT(*) FROM roster WHERE driver_id=? AND date=?",
+            (driver_id, DATE),
+        ).fetchone()[0] == 1
+        assert con.execute(
+            """
+            SELECT COUNT(*) FROM audit_log
+            WHERE object_type='roster_assignments'
+              AND action='изменение назначения графика'
+            """
+        ).fetchone()[0] == 1
+    finally:
+        con.close()
