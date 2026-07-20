@@ -225,3 +225,85 @@ def build_output_shifts(trips, *, shift_type, handover_min):
     if conflicts:
         raise ValueError("План смен не покрывает рейсы выпуска без конфликтов")
     return result
+
+
+def replace_shift_boundaries(
+    trips, shifts, *, shift_id, trip_from_id, trip_to_id, shift_type
+):
+    """Replace one shift range while preserving exact contiguous coverage."""
+    ordered = _ordered_trips(trips)
+    proposed = [dict(row) for row in shifts]
+    if validate_output_shift_plan(ordered, proposed):
+        raise ValueError("Исходный план смен содержит конфликты")
+    positions = {int(row["id"]): index for index, row in enumerate(ordered)}
+    try:
+        first = positions[int(trip_from_id)]
+        last = positions[int(trip_to_id)]
+    except (KeyError, TypeError, ValueError):
+        raise ValueError("Граница ссылается на неизвестный рейс")
+    if first > last:
+        raise ValueError("Начальный рейс смены расположен после конечного")
+
+    proposed.sort(key=lambda row: positions[int(row["trip_from_id"])])
+    selected_index = next(
+        (index for index, row in enumerate(proposed)
+         if int(row.get("id", 0)) == int(shift_id)),
+        None,
+    )
+    if selected_index is None:
+        raise ValueError("Смена не найдена")
+    if selected_index == 0 and first != 0:
+        raise ValueError("Первый рейс выпуска должен быть покрыт")
+    if selected_index == len(proposed) - 1 and last != len(ordered) - 1:
+        raise ValueError("Последний рейс выпуска должен быть покрыт")
+
+    ranges = [
+        [positions[int(row["trip_from_id"])], positions[int(row["trip_to_id"])]]
+        for row in proposed
+    ]
+    ranges[selected_index] = [first, last]
+    if selected_index:
+        ranges[selected_index - 1][1] = first - 1
+    if selected_index + 1 < len(ranges):
+        ranges[selected_index + 1][0] = last + 1
+    if any(start > end for start, end in ranges):
+        raise ValueError("Изменение оставляет соседнюю смену без рейсов")
+
+    result = []
+    for index, (row, (start, end)) in enumerate(zip(proposed, ranges), start=1):
+        updated = dict(row)
+        updated.update({
+            "shift_number": index,
+            "trip_from_id": int(ordered[start]["id"]),
+            "trip_to_id": int(ordered[end]["id"]),
+            "start_sec": int(ordered[start]["dep_sec"]),
+            "end_sec": int(ordered[end]["arr_sec"]),
+        })
+        if index - 1 == selected_index:
+            try:
+                slots = int(shift_type["driver_slots"])
+            except (KeyError, TypeError, ValueError):
+                raise ValueError("Некорректное количество водительских мест")
+            if slots not in (1, 2):
+                raise ValueError("Количество водительских мест должно быть 1 или 2")
+            updated["shift_type_id"] = int(shift_type["id"])
+            updated["driver_slots"] = slots
+        result.append(updated)
+    if validate_output_shift_plan(ordered, result):
+        raise ValueError("Изменённый план смен содержит конфликты")
+    return result
+
+
+_replace_shift_boundaries_validated_plan = replace_shift_boundaries
+
+
+def replace_shift_boundaries(
+    trips, shifts, *, shift_id, trip_from_id, trip_to_id, shift_type
+):
+    try:
+        int(shift_type["id"])
+    except (KeyError, TypeError, ValueError):
+        raise ValueError("Некорректный тип смены")
+    return _replace_shift_boundaries_validated_plan(
+        trips, shifts, shift_id=shift_id, trip_from_id=trip_from_id,
+        trip_to_id=trip_to_id, shift_type=shift_type)

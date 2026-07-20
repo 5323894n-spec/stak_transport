@@ -1060,3 +1060,198 @@ def route_shift_generation_apply(route_id: int, payload: dict = Body(...),
         raise HTTPException(400, str(exc) or "Не удалось применить план смен")
     finally:
         con.close()
+
+
+def _manual_output_rows(con, route_id, day_type, output_number):
+    return db.rows(con.execute(
+        "SELECT * FROM output_shifts WHERE route_id=? AND day_type=? "
+        "AND output_number=? ORDER BY shift_number,id",
+        (route_id, day_type, output_number),
+    ))
+
+
+def _manual_link_trips(con, trips, shifts):
+    positions = {int(trip["id"]): index for index, trip in enumerate(trips)}
+    trip_ids = [int(trip["id"]) for trip in trips]
+    marks = ",".join("?" for _ in trip_ids)
+    con.execute(f"UPDATE route_trips SET output_shift_id=NULL WHERE id IN ({marks})",
+                trip_ids)
+    for shift in shifts:
+        first = positions[int(shift["trip_from_id"])]
+        last = positions[int(shift["trip_to_id"])]
+        covered = trip_ids[first:last + 1]
+        covered_marks = ",".join("?" for _ in covered)
+        con.execute(
+            f"UPDATE route_trips SET shift_number=?,output_shift_id=? "
+            f"WHERE id IN ({covered_marks})",
+            (int(shift["shift_number"]), int(shift["id"]), *covered),
+        )
+
+
+@router.patch("/output-shifts/{shift_id}")
+def output_shift_manual_update(shift_id: int, payload: dict = Body(...),
+                               user=Depends(current_user)):
+    from .route_shifts import replace_shift_boundaries
+
+    require_write(user, "trips")
+    reason = str(payload.get("reason") or "").strip()
+    if not reason:
+        raise HTTPException(400, "Укажите причину ручного изменения")
+    con = db.connect()
+    try:
+        selected = db.one(con.execute("SELECT * FROM output_shifts WHERE id=?",
+                                      (shift_id,)))
+        if not selected:
+            raise HTTPException(404, "Смена не найдена")
+        shift_type = _active_type_or_error(con, payload.get("shift_type_id"),
+                                           "тип смены")
+        try:
+            trip_from_id = int(payload.get("trip_from_id"))
+            trip_to_id = int(payload.get("trip_to_id"))
+        except (TypeError, ValueError):
+            raise ValueError("Укажите корректные границы смены")
+        trips = [trip for trip in _generation_trips(
+            con, selected["route_id"], selected["day_type"]
+        ) if int(trip["output_number"]) == int(selected["output_number"])]
+        before = _manual_output_rows(con, selected["route_id"],
+                                     selected["day_type"],
+                                     selected["output_number"])
+        plan = replace_shift_boundaries(
+            trips, before, shift_id=shift_id, trip_from_id=trip_from_id,
+            trip_to_id=trip_to_id, shift_type=shift_type,
+        )
+        edited = next(row for row in plan if int(row["id"]) == shift_id)
+        if (int(edited["end_sec"]) - int(edited["start_sec"]) >
+                int(shift_type["max_duration_min"]) * 60):
+            raise ValueError("Длительность смены превышает максимум выбранного типа")
+        timestamp = datetime.datetime.now().isoformat(timespec="seconds")
+        for row in plan:
+            manual = int(row["id"]) == shift_id
+            con.execute(
+                "UPDATE output_shifts SET shift_number=?,shift_type_id=?,"
+                "trip_from_id=?,trip_to_id=?,start_sec=?,end_sec=?,driver_slots=?,"
+                "handover_after_min=?,source=?,is_manual_locked=?,manual_reason=?,"
+                "updated_at=? WHERE id=?",
+                (row["shift_number"], row["shift_type_id"], row["trip_from_id"],
+                 row["trip_to_id"], row["start_sec"], row["end_sec"],
+                 row["driver_slots"], row.get("handover_after_min", 0),
+                 "manual" if manual else row.get("source", "generated"),
+                 1 if manual else int(row.get("is_manual_locked", 0)),
+                 reason if manual else row.get("manual_reason"), timestamp, row["id"]),
+            )
+        persisted = _manual_output_rows(con, selected["route_id"],
+                                        selected["day_type"],
+                                        selected["output_number"])
+        _manual_link_trips(con, trips, persisted)
+        if validate_output_shift_plan(trips, persisted):
+            raise ValueError("Изменённый план не покрывает выпуск без конфликтов")
+        db.audit(con, user["username"], "ручное изменение границ смены",
+                 "output_shifts", shift_id, old=before, new=persisted)
+        con.commit()
+        return {"shift": next(row for row in persisted if row["id"] == shift_id),
+                "shifts": persisted}
+    except HTTPException:
+        con.rollback()
+        raise
+    except (KeyError, TypeError, ValueError, sqlite3.IntegrityError) as exc:
+        con.rollback()
+        raise HTTPException(400, str(exc) or "Не удалось изменить смену")
+    finally:
+        con.close()
+
+
+def _manual_regenerate_output(con, route_id, day_type, output_number,
+                              settings, timestamp):
+    trips = [trip for trip in _generation_trips(con, route_id, day_type)
+             if int(trip["output_number"]) == output_number]
+    if not trips:
+        raise ValueError("В выбранном выпуске нет рейсов")
+    shift_type = _require_active_generated_type(_shift_type_for_output(settings, trips))
+    plan = build_output_shifts(trips, shift_type=shift_type,
+                               handover_min=settings["handover_min"])
+    old = _manual_output_rows(con, route_id, day_type, output_number)
+    old_ids = [row["id"] for row in old]
+    if old_ids:
+        marks = ",".join("?" for _ in old_ids)
+        con.execute(f"UPDATE roster_assignments SET output_shift_id=NULL "
+                    f"WHERE output_shift_id IN ({marks})", old_ids)
+    con.execute("UPDATE route_trips SET output_shift_id=NULL WHERE route_id=? "
+                "AND day_type=? AND output_number=?", (route_id, day_type, output_number))
+    con.execute("DELETE FROM output_shifts WHERE route_id=? AND day_type=? "
+                "AND output_number=?", (route_id, day_type, output_number))
+    inserted = []
+    for shift in plan:
+        cursor = con.execute(
+            "INSERT INTO output_shifts(route_id,day_type,output_number,shift_number,"
+            "shift_type_id,trip_from_id,trip_to_id,start_sec,end_sec,driver_slots,"
+            "handover_after_min,source,is_manual_locked,manual_reason,created_at,updated_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,'generated',0,NULL,?,?)",
+            (route_id, day_type, output_number, shift["shift_number"],
+             shift["shift_type_id"], shift["trip_from_id"], shift["trip_to_id"],
+             shift["start_sec"], shift["end_sec"], shift["driver_slots"],
+             shift.get("handover_after_min", 0), timestamp, timestamp),
+        )
+        inserted.append({**shift, "id": cursor.lastrowid})
+    _manual_link_trips(con, trips, inserted)
+    return old, _manual_output_rows(con, route_id, day_type, output_number)
+
+
+@router.post("/routes/{route_id}/output-shifts/reset-manual")
+def output_shifts_reset_manual(route_id: int, payload: dict = Body(...),
+                               user=Depends(current_user)):
+    require_write(user, "trips")
+    day_type = str(payload.get("day_type") or "").strip()
+    if not day_type:
+        raise HTTPException(400, "Укажите тип дня")
+    shift_id = payload.get("shift_id")
+    output_number = payload.get("output_number")
+    if shift_id not in (None, "") and output_number not in (None, ""):
+        raise HTTPException(400, "Укажите только shift_id или output_number")
+    con = db.connect()
+    try:
+        _route_or_404(con, route_id)
+        if shift_id not in (None, ""):
+            try:
+                shift_id = int(shift_id)
+            except (TypeError, ValueError):
+                raise ValueError("Некорректный shift_id")
+            target = db.one(con.execute("SELECT output_number FROM output_shifts "
+                "WHERE id=? AND route_id=? AND day_type=?", (shift_id, route_id, day_type)))
+            if not target:
+                raise HTTPException(404, "Смена не найдена в выбранной области")
+            outputs = [int(target["output_number"])]
+        elif output_number not in (None, ""):
+            try:
+                output_number = int(output_number)
+            except (TypeError, ValueError):
+                raise ValueError("Некорректный номер выпуска")
+            exists = con.execute("SELECT 1 FROM route_trips WHERE route_id=? AND "
+                "day_type=? AND output_number=?", (route_id, day_type, output_number)).fetchone()
+            if not exists:
+                raise HTTPException(404, "Выпуск не найден в выбранной области")
+            outputs = [output_number]
+        else:
+            outputs = [int(row[0]) for row in con.execute("SELECT DISTINCT output_number "
+                "FROM route_trips WHERE route_id=? AND day_type=? ORDER BY output_number",
+                (route_id, day_type))]
+            if not outputs:
+                raise HTTPException(404, "Для выбранного дня нет выпусков")
+        settings = _settings_payload(con, route_id, day_type)
+        timestamp = datetime.datetime.now().isoformat(timespec="seconds")
+        before, after = [], []
+        for number in outputs:
+            old, new = _manual_regenerate_output(con, route_id, day_type, number,
+                                                  settings, timestamp)
+            before.extend(old); after.extend(new)
+        db.audit(con, user["username"], "сброс ручных смен", "output_shifts",
+                 route_id, old=before, new=after)
+        con.commit()
+        return {"route_id": route_id, "day_type": day_type,
+                "output_numbers": outputs, "shifts": after}
+    except HTTPException:
+        con.rollback(); raise
+    except (KeyError, TypeError, ValueError, sqlite3.IntegrityError) as exc:
+        con.rollback()
+        raise HTTPException(400, str(exc) or "Не удалось сбросить ручные смены")
+    finally:
+        con.close()
