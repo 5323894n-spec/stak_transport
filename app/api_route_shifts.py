@@ -1124,6 +1124,7 @@ def output_shift_manual_update(shift_id: int, payload: dict = Body(...),
         if (int(edited["end_sec"]) - int(edited["start_sec"]) >
                 int(shift_type["max_duration_min"]) * 60):
             raise ValueError("Длительность смены превышает максимум выбранного типа")
+        _validate_changed_shift_constraints(con, before, plan)
         timestamp = datetime.datetime.now().isoformat(timespec="seconds")
         for row in plan:
             manual = int(row["id"]) == shift_id
@@ -1255,3 +1256,37 @@ def output_shifts_reset_manual(route_id: int, payload: dict = Body(...),
         raise HTTPException(400, str(exc) or "Не удалось сбросить ручные смены")
     finally:
         con.close()
+
+
+def _validate_changed_shift_constraints(con, before, proposed):
+    before_by_id = {int(row["id"]): row for row in before}
+    constrained_fields = (
+        "shift_number", "shift_type_id", "trip_from_id", "trip_to_id",
+        "start_sec", "end_sec", "driver_slots",
+    )
+    for shift in proposed:
+        previous = before_by_id.get(int(shift["id"]))
+        if previous and all(
+            previous.get(field) == shift.get(field) for field in constrained_fields
+        ):
+            continue
+        shift_type = _shift_type_by_id(con, shift.get("shift_type_id"))
+        if not shift_type:
+            raise ValueError("Тип изменённой смены не найден")
+        try:
+            slots = int(shift["driver_slots"])
+            expected_slots = int(shift_type["driver_slots"])
+            duration = int(shift["end_sec"]) - int(shift["start_sec"])
+            maximum = int(shift_type["max_duration_min"]) * 60
+        except (KeyError, TypeError, ValueError):
+            raise ValueError("Некорректные параметры изменённой смены")
+        if slots not in (1, 2) or slots != expected_slots:
+            raise ValueError(
+                "Количество водительских мест не соответствует типу смены"
+            )
+        if duration <= 0:
+            raise ValueError("Длительность смены должна быть больше нуля")
+        if duration > maximum:
+            raise ValueError(
+                "Длительность изменённой смены превышает максимум её типа"
+            )

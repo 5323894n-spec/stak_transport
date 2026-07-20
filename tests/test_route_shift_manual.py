@@ -271,3 +271,132 @@ def test_reset_entire_day_without_selector(client):
                            json={"day_type": DAY})
     assert response.status_code == 200, response.text
     assert all(not row["is_manual_locked"] for row in response.json()["shifts"])
+
+
+def test_patch_rolls_back_when_neighbor_exceeds_its_own_type_max(client):
+    import app.db as db
+
+    route_id, trips, shifts, _, double = _seed_output()
+    con = db.connect()
+    try:
+        short_type = con.execute(
+            "INSERT INTO shift_types(code,name,work_pattern,planned_duration_min,"
+            "max_duration_min,driver_slots,allow_split,color,active,created_at,updated_at) "
+            "VALUES('manual_short','Short','single',60,60,1,0,'#123456',1,"
+            "datetime('now'),datetime('now'))"
+        ).lastrowid
+        con.execute("UPDATE output_shifts SET shift_type_id=? WHERE id=?",
+                    (short_type, shifts[0]))
+        con.commit()
+        before = _snapshot(con, route_id)
+    finally:
+        con.close()
+
+    response = client.patch(
+        f"/api/output-shifts/{shifts[1]}",
+        json={"trip_from_id": trips[2], "trip_to_id": trips[2],
+              "shift_type_id": double, "reason": "move second boundary"},
+    )
+    assert response.status_code == 400, response.text
+    assert "длитель" in response.json()["detail"].lower()
+    con = db.connect()
+    try:
+        assert _snapshot(con, route_id) == before
+    finally:
+        con.close()
+
+
+def _add_manual_output(route_id, output_number, day_type=DAY):
+    import app.db as db
+
+    con = db.connect()
+    try:
+        shift_type_id = con.execute(
+            "SELECT id FROM shift_types WHERE code='single_8h'"
+        ).fetchone()[0]
+        trip_id = con.execute(
+            "INSERT INTO route_trips(route_id,day_type,output_number,shift_number,"
+            "trip_number,direction,dep_time,arr_time,distance_km) "
+            "VALUES(?,?,?,?,1,'прямое','10:00','11:00',1)",
+            (route_id, day_type, output_number, 1),
+        ).lastrowid
+        shift_id = con.execute(
+            "INSERT INTO output_shifts(route_id,day_type,output_number,shift_number,"
+            "shift_type_id,trip_from_id,trip_to_id,start_sec,end_sec,driver_slots,"
+            "handover_after_min,source,is_manual_locked,manual_reason,created_at,updated_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?,1,0,'manual',1,'other scope',datetime('now'),"
+            "datetime('now'))",
+            (route_id, day_type, output_number, 1, shift_type_id,
+             trip_id, trip_id, 36000, 39600),
+        ).lastrowid
+        con.execute("UPDATE route_trips SET output_shift_id=? WHERE id=?",
+                    (shift_id, trip_id))
+        con.commit()
+        return trip_id, shift_id
+    finally:
+        con.close()
+
+
+def test_reset_by_shift_id_regenerates_only_its_output(client):
+    import app.db as db
+
+    route_id, trips, shifts, _, double = _seed_output()
+    assert _patch(client, shifts[0], trips, double).status_code == 200
+    _, other_output_shift = _add_manual_output(route_id, 2)
+    _, other_day_shift = _add_manual_output(route_id, 1, "выходные")
+    con = db.connect()
+    try:
+        unrelated_before = [dict(row) for row in con.execute(
+            "SELECT * FROM output_shifts WHERE id IN (?,?) ORDER BY id",
+            (other_output_shift, other_day_shift),
+        )]
+    finally:
+        con.close()
+
+    response = client.post(
+        f"/api/routes/{route_id}/output-shifts/reset-manual",
+        json={"day_type": DAY, "shift_id": shifts[0]},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["output_numbers"] == [1]
+    assert all(not row["is_manual_locked"] for row in response.json()["shifts"])
+    con = db.connect()
+    try:
+        unrelated_after = [dict(row) for row in con.execute(
+            "SELECT * FROM output_shifts WHERE id IN (?,?) ORDER BY id",
+            (other_output_shift, other_day_shift),
+        )]
+        assert unrelated_after == unrelated_before
+        assert con.execute(
+            "SELECT COUNT(*) FROM route_trips WHERE route_id=? AND day_type=? "
+            "AND output_number=1 AND output_shift_id IS NULL", (route_id, DAY)
+        ).fetchone()[0] == 0
+        assert con.execute(
+            "SELECT COUNT(*) FROM audit_log WHERE object_type='output_shifts' "
+            "AND action LIKE '%сброс%' AND object_id=?", (str(route_id),)
+        ).fetchone()[0] == 1
+    finally:
+        con.close()
+
+
+def test_reset_wrong_day_for_valid_route_is_scoped_and_non_mutating(client):
+    import app.db as db
+
+    route_id, trips, shifts, _, double = _seed_output()
+    assert _patch(client, shifts[0], trips, double).status_code == 200
+    con = db.connect()
+    try:
+        before = _snapshot(con, route_id)
+    finally:
+        con.close()
+    response = client.post(
+        f"/api/routes/{route_id}/output-shifts/reset-manual",
+        json={"day_type": "выходные"},
+    )
+    assert response.status_code in (400, 404)
+    assert response.json()["detail"]
+    con = db.connect()
+    try:
+        assert _snapshot(con, route_id) == before
+    finally:
+        con.close()
