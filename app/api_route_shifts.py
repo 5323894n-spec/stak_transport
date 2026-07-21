@@ -393,6 +393,8 @@ def route_output_shifts_export(route_id: int, day_type: str = "",
     service_date = str(service_date or "").strip()
     parsed_date = None
     if service_date:
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", service_date):
+            raise HTTPException(400, "Дата должна быть в формате ГГГГ-ММ-ДД")
         try:
             parsed_date = datetime.date.fromisoformat(service_date)
         except ValueError:
@@ -402,9 +404,9 @@ def route_output_shifts_export(route_id: int, day_type: str = "",
         route = _route_or_404(con, route_id)
         count_where = "WHERE output_shift_id IS NOT NULL"
         query_args = []
-        if service_date:
+        if parsed_date:
             count_where += " AND date=?"
-            query_args.append(service_date)
+            query_args.append(parsed_date.isoformat())
         rows = db.rows(con.execute(
             f"""
             SELECT os.id, os.output_number, os.shift_number,

@@ -143,7 +143,7 @@ def test_output_shift_export_has_ordered_typed_rows_and_manual_highlight(tmp_pat
     assert sheet["H4"].value == pytest.approx(8.5)
     assert sheet["I5"].value == 2
     assert sheet["A4"].fill.fgColor.rgb in ("00FFF2CC", "FFF2CC")
-    assert sheet["A5"].fill.fgColor.rgb not in (None, "00000000", "000000")
+    assert sheet["A5"].fill.fgColor.rgb in ("00E2F0D9", "E2F0D9")
 
 
 def test_output_shift_export_is_print_ready(tmp_path):
@@ -204,3 +204,19 @@ def test_output_shift_export_empty_and_validation_behaviour(tmp_path):
     assert anonymous.get(
         f"/api/routes/{route_id}/output-shifts/export.xlsx?day_type=будни"
     ).status_code == 401
+
+
+@pytest.mark.parametrize("service_date", [
+    "20260722",
+    "2026-W30-3",
+    "2026-02-30",
+])
+def test_output_shift_export_rejects_noncanonical_or_impossible_date(
+    tmp_path, service_date,
+):
+    client = _client(tmp_path)
+    route_id = _seed_export_data()
+    response = client.get(
+        f"/api/routes/{route_id}/output-shifts/export.xlsx?day_type={DAY_TYPE}&service_date={service_date}"
+    )
+    assert response.status_code == 400
