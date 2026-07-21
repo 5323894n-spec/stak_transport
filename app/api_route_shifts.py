@@ -9,14 +9,22 @@ import sqlite3
 from collections import defaultdict
 
 from fastapi import APIRouter, Body, Depends, HTTPException
+from openpyxl import Workbook
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+from openpyxl.utils import get_column_letter
 
 from . import db
 from .auth import current_user, require_write
 from .route_shifts import build_output_shifts, validate_output_shift_plan
+from .xl import _xlsx_download_response
 
 
 router = APIRouter(prefix="/api")
 SHIFT_CODE_RE = re.compile(r"^[a-z0-9_]+$")
+EXPORT_DARK = "17365D"
+EXPORT_ALT = "F5F8FC"
+EXPORT_MANUAL = "FFF2CC"
+EXPORT_TWO_DRIVER = "E2F0D9"
 
 
 def _shift_type_payload(row):
@@ -309,6 +317,168 @@ def route_output_shifts_list(route_id: int, day_type: str = "",
             "assignment_count_scope": "all_dates",
             "items": items,
         }
+    finally:
+        con.close()
+
+
+def _service_clock(seconds):
+    seconds = int(seconds)
+    return f"{seconds // 3600:02d}:{seconds % 3600 // 60:02d}"
+
+
+def _prepare_shift_export_sheet(ws, *, title, metadata, headers, widths):
+    last_column = len(headers)
+    ws.title = "Смены выходов"
+    ws.sheet_view.showGridLines = False
+    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=last_column)
+    title_cell = ws.cell(1, 1, title)
+    title_cell.font = Font(name="Calibri", size=15, bold=True, color="FFFFFF")
+    title_cell.fill = PatternFill("solid", fgColor=EXPORT_DARK)
+    title_cell.alignment = Alignment(horizontal="center", vertical="center")
+    ws.row_dimensions[1].height = 27
+    ws.merge_cells(start_row=2, start_column=1, end_row=2, end_column=last_column)
+    metadata_cell = ws.cell(2, 1, metadata)
+    metadata_cell.font = Font(italic=True, color="44546A")
+    metadata_cell.alignment = Alignment(horizontal="left", vertical="center")
+    ws.row_dimensions[2].height = 22
+    thin = Side(style="thin", color="B4C6E7")
+    for column, header in enumerate(headers, 1):
+        cell = ws.cell(3, column, header)
+        cell.font = Font(bold=True, color="FFFFFF")
+        cell.fill = PatternFill("solid", fgColor=EXPORT_DARK)
+        cell.alignment = Alignment(
+            horizontal="center", vertical="center", wrap_text=True
+        )
+        cell.border = Border(bottom=thin, right=thin)
+        ws.column_dimensions[get_column_letter(column)].width = widths[column - 1]
+    ws.row_dimensions[3].height = 34
+    ws.freeze_panes = "A4"
+    ws.print_title_rows = "1:3"
+    ws.page_setup.orientation = "landscape"
+    ws.page_setup.paperSize = ws.PAPERSIZE_A4
+    ws.page_setup.fitToWidth = 1
+    ws.page_setup.fitToHeight = 0
+    ws.sheet_properties.pageSetUpPr.fitToPage = True
+    ws.page_margins.left = 0.25
+    ws.page_margins.right = 0.25
+    ws.page_margins.top = 0.4
+    ws.page_margins.bottom = 0.4
+
+
+def _finish_shift_export_sheet(ws):
+    thin = Side(style="thin", color="D9E2F3")
+    for row_index, row in enumerate(ws.iter_rows(min_row=4), 4):
+        zebra = PatternFill("solid", fgColor=EXPORT_ALT) if row_index % 2 == 0 else None
+        for cell in row:
+            cell.border = Border(bottom=thin)
+            cell.alignment = Alignment(
+                horizontal="center", vertical="center", wrap_text=True
+            )
+            if zebra and cell.fill.fill_type is None:
+                cell.fill = zebra
+        ws.row_dimensions[row_index].height = 30
+    end_row = max(3, ws.max_row)
+    last_column = get_column_letter(ws.max_column)
+    ws.auto_filter.ref = f"A3:{last_column}{end_row}"
+    ws.print_area = f"A1:{last_column}{end_row}"
+
+
+@router.get("/routes/{route_id}/output-shifts/export.xlsx")
+def route_output_shifts_export(route_id: int, day_type: str = "",
+                               service_date: str = "",
+                               user=Depends(current_user)):
+    day_type = str(day_type or "").strip()
+    if not day_type:
+        raise HTTPException(400, "Укажите тип дня")
+    service_date = str(service_date or "").strip()
+    parsed_date = None
+    if service_date:
+        try:
+            parsed_date = datetime.date.fromisoformat(service_date)
+        except ValueError:
+            raise HTTPException(400, "Дата должна быть в формате ГГГГ-ММ-ДД")
+    con = db.connect()
+    try:
+        route = _route_or_404(con, route_id)
+        count_where = "WHERE output_shift_id IS NOT NULL"
+        query_args = []
+        if service_date:
+            count_where += " AND date=?"
+            query_args.append(service_date)
+        rows = db.rows(con.execute(
+            f"""
+            SELECT os.id, os.output_number, os.shift_number,
+                   st.name AS shift_type_name,
+                   first_trip.trip_number AS trip_from_number,
+                   last_trip.trip_number AS trip_to_number,
+                   os.start_sec, os.end_sec, os.driver_slots,
+                   os.handover_after_min, os.source, os.is_manual_locked,
+                   os.manual_reason,
+                   COALESCE(assignments.assignment_count, 0) AS assignment_count
+            FROM output_shifts os
+            JOIN shift_types st ON st.id=os.shift_type_id
+            JOIN route_trips first_trip ON first_trip.id=os.trip_from_id
+            JOIN route_trips last_trip ON last_trip.id=os.trip_to_id
+            LEFT JOIN (
+              SELECT output_shift_id, COUNT(*) AS assignment_count
+              FROM roster_assignments
+              {count_where}
+              GROUP BY output_shift_id
+            ) assignments ON assignments.output_shift_id=os.id
+            WHERE os.route_id=? AND os.day_type=?
+            ORDER BY os.output_number,os.shift_number,os.id
+            """,
+            (*query_args, route_id, day_type),
+        ))
+        if parsed_date:
+            count_scope = f"дата назначений: {parsed_date.strftime('%d.%m.%Y')}"
+        else:
+            count_scope = "назначения: все даты"
+        headers = [
+            "Выход", "Смена", "Тип смены", "Диапазон рейсов", "Начало",
+            "Окончание", "Длительность, мин", "Длительность, ч",
+            "Водительских мест", "Пересмена, мин", "Источник", "Ручная",
+            "Причина ручной правки", "Назначений",
+        ]
+        widths = [9, 9, 22, 18, 12, 12, 17, 16, 17, 16, 15, 11, 32, 14]
+        workbook = Workbook()
+        sheet = workbook.active
+        _prepare_shift_export_sheet(
+            sheet,
+            title=f"Смены выходов маршрута № {route['number']}",
+            metadata=(f"{route.get('name') or 'Без наименования'} · "
+                      f"тип дня: {day_type} · {count_scope}"),
+            headers=headers,
+            widths=widths,
+        )
+        for row_index, item in enumerate(rows, 4):
+            duration_min = (int(item["end_sec"]) - int(item["start_sec"])) // 60
+            sheet.append([
+                int(item["output_number"]), int(item["shift_number"]),
+                item["shift_type_name"],
+                f"{item['trip_from_number']}–{item['trip_to_number']}",
+                _service_clock(item["start_sec"]), _service_clock(item["end_sec"]),
+                duration_min, duration_min / 60, int(item["driver_slots"]),
+                int(item["handover_after_min"]), item["source"],
+                "Да" if item["is_manual_locked"] else "Нет",
+                item["manual_reason"] or "", int(item["assignment_count"]),
+            ])
+            fill = None
+            if item["is_manual_locked"]:
+                fill = PatternFill("solid", fgColor=EXPORT_MANUAL)
+            elif int(item["driver_slots"]) == 2:
+                fill = PatternFill("solid", fgColor=EXPORT_TWO_DRIVER)
+            if fill:
+                for cell in sheet[row_index]:
+                    cell.fill = fill
+            sheet.cell(row_index, 7).number_format = "#,##0"
+            sheet.cell(row_index, 8).number_format = "0.00"
+            for column in (1, 2, 9, 10, 14):
+                sheet.cell(row_index, column).number_format = "#,##0"
+        _finish_shift_export_sheet(sheet)
+        return _xlsx_download_response(
+            workbook, f"route_{route['number']}_{day_type}_output_shifts.xlsx"
+        )
     finally:
         con.close()
 
