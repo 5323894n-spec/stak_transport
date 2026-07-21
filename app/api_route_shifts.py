@@ -264,6 +264,55 @@ def route_shift_settings_save(route_id: int, day_type: str,
         con.close()
 
 
+@router.get("/routes/{route_id}/output-shifts")
+def route_output_shifts_list(route_id: int, day_type: str = "",
+                             user=Depends(current_user)):
+    day_type = str(day_type or "").strip()
+    if not day_type:
+        raise HTTPException(400, "Укажите тип дня")
+    con = db.connect()
+    try:
+        _route_or_404(con, route_id)
+        items = db.rows(con.execute(
+            """
+            SELECT os.id, os.route_id, os.day_type, os.output_number,
+                   os.shift_number, os.shift_type_id,
+                   st.code AS shift_type_code, st.name AS shift_type_name,
+                   st.color AS shift_type_color,
+                   os.trip_from_id, first_trip.trip_number AS trip_from_number,
+                   os.trip_to_id, last_trip.trip_number AS trip_to_number,
+                   os.start_sec, os.end_sec,
+                   os.end_sec - os.start_sec AS duration_sec,
+                   os.driver_slots, os.handover_after_min, os.source,
+                   os.is_manual_locked, os.manual_reason,
+                   COALESCE(assignments.assignment_count, 0) AS assignment_count
+            FROM output_shifts os
+            JOIN shift_types st ON st.id=os.shift_type_id
+            JOIN route_trips first_trip ON first_trip.id=os.trip_from_id
+            JOIN route_trips last_trip ON last_trip.id=os.trip_to_id
+            LEFT JOIN (
+              SELECT output_shift_id, COUNT(*) AS assignment_count
+              FROM roster_assignments
+              WHERE output_shift_id IS NOT NULL
+              GROUP BY output_shift_id
+            ) assignments ON assignments.output_shift_id=os.id
+            WHERE os.route_id=? AND os.day_type=?
+            ORDER BY os.output_number,os.shift_number,os.id
+            """,
+            (route_id, day_type),
+        ))
+        for item in items:
+            item["is_manual_locked"] = bool(item["is_manual_locked"])
+        return {
+            "route_id": route_id,
+            "day_type": day_type,
+            "assignment_count_scope": "all_dates",
+            "items": items,
+        }
+    finally:
+        con.close()
+
+
 def _clock_seconds(value):
     parts = str(value or "").strip().split(":")
     if len(parts) != 2:

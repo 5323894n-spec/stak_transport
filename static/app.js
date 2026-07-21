@@ -1065,26 +1065,37 @@ function scheduleShiftDuration(startSec, endSec) {
   return `${Math.floor(minutes / 60)} ч ${minutes % 60} мин`;
 }
 
-function scheduleShiftCandidateDates(dayType) {
-  const weekdays = dayType === "суббота" ? [6] : dayType === "воскресенье" ? [0] : [1, 2, 3, 4, 5];
-  const result = [];
-  const start = new Date();
-  start.setHours(12, 0, 0, 0);
-  for (let offset = 0; offset < 42; offset += 1) {
-    const date = new Date(start);
-    date.setDate(start.getDate() + offset);
-    if (weekdays.includes(date.getDay())) result.push(date.toISOString().slice(0, 10));
-  }
-  return result;
+function scheduleViewCurrent() {
+  return (location.hash || "#/dashboard").slice(2).split("/")[0] === "schedule";
+}
+
+function scheduleScopeCurrent(st, routeId, dayType, loadEpoch) {
+  return scheduleViewCurrent() && window._sched === st &&
+    +st.route_id === +routeId && st.day_type === dayType &&
+    st.scheduleLoadEpoch === loadEpoch;
+}
+
+function scheduleMutationScopeCurrent(st, routeId, dayType) {
+  return scheduleViewCurrent() && window._sched === st &&
+    +st.route_id === +routeId && st.day_type === dayType;
 }
 
 async function scheduleLoadOutputShifts(routeId, dayType) {
-  for (const date of scheduleShiftCandidateDates(dayType)) {
-    const result = await api(`/api/roster/schedule-options?route_id=${routeId}&date=${date}`);
-    if (result.day_type === dayType) return { items: result.outputs || [], date };
-  }
-  throw new Error(`Не удалось подобрать календарную дату для типа дня «${dayType}»`);
+  return api(`/api/routes/${routeId}/output-shifts?day_type=${encodeURIComponent(dayType)}`);
 }
+
+function scheduleFinishShiftBusy(st) {
+  st.shiftBusy = false;
+  st.shiftBusyAction = "";
+  if (scheduleViewCurrent() && window._sched === st) route();
+}
+function scheduleSetShiftControlsDisabled(disabled) {
+  document.querySelectorAll(
+    ".schedule-shift-settings button, .schedule-shift-settings input, .schedule-shift-settings select, " +
+    ".schedule-shift-preview button, .schedule-output-shift-workspace button"
+  ).forEach(control => { control.disabled = disabled; });
+}
+
 
 function scheduleShiftType(st, shift) {
   return (st.shiftTypes || []).find(item => +item.id === +shift.shift_type_id) || {
@@ -1108,7 +1119,7 @@ function scheduleShiftSettings(st) {
   const options = (selectedId, empty) => `${empty ? '<option value="">не использовать</option>' : ""}${types.map(type =>
     `<option value="${+type.id}" ${+selectedId === +type.id ? "selected" : ""}>${esc(type.name)} · ${esc(type.planned_duration_min)} мин</option>`
   ).join("")}`;
-  const disabled = st.shiftSettingsSaving ? "disabled" : "";
+  const disabled = st.shiftBusy ? "disabled" : "";
   return `<section class="panel schedule-shift-settings" aria-labelledby="schedule-shift-settings-title">
     <div class="schedule-preview-head"><div><h3 id="schedule-shift-settings-title">Настройки смен</h3>
       <p class="muted">Параметры маршрута «${esc(st.day_type)}» используются для безопасного предпросмотра разделения выпусков.</p></div>
@@ -1121,18 +1132,21 @@ function scheduleShiftSettings(st) {
       <label class="schedule-shift-checkbox" for="schedule-shift-auto-split"><input id="schedule-shift-auto-split" type="checkbox" ${settings.auto_split ? "checked" : ""} ${disabled}> Автоматически делить выпуск на смены</label>
     </div>
     <div id="schedule-shift-settings-error" class="schedule-shift-error" role="alert">${esc(st.shiftSettingsError || "")}</div>
-    <div class="toolbar"><button class="btn sec" onclick="scheduleShiftSettingsSave()" ${disabled}>${st.shiftSettingsSaving ? "Сохранение…" : "Сохранить настройки"}</button>
-      <button id="schedule-shift-preview-button" class="btn" onclick="scheduleShiftPreview()" ${st.shiftPreviewLoading ? "disabled" : ""}>${st.shiftPreviewLoading ? "Расчёт…" : "Предпросмотр смен"}</button></div>
+    <div class="toolbar"><button class="btn sec" onclick="scheduleShiftSettingsSave()" ${disabled}>${st.shiftBusyAction === "settings" ? "Сохранение…" : "Сохранить настройки"}</button>
+      <button id="schedule-shift-preview-button" class="btn" onclick="scheduleShiftPreview()" ${disabled}>${st.shiftBusyAction === "preview" ? "Расчёт…" : "Предпросмотр смен"}</button></div>
   </section>`;
 }
 
 async function scheduleShiftSettingsSave() {
   const st = window._sched;
-  if (!st || st.shiftSettingsSaving) return;
-  st.shiftSettingsSaving = true;
+  if (!st || st.shiftBusy) return;
+  const routeId = +st.route_id;
+  const dayType = st.day_type;
+  st.shiftPreview = null;
+  st.shiftBusy = true;
+  st.shiftBusyAction = "settings";
   st.shiftSettingsError = "";
-  const button = document.querySelector(".schedule-shift-settings .btn.sec");
-  if (button) { button.disabled = true; button.textContent = "Сохранение…"; }
+  scheduleSetShiftControlsDisabled(true);
   try {
     const body = {
       default_shift_type_id: +$("schedule-shift-default-type").value,
@@ -1141,17 +1155,19 @@ async function scheduleShiftSettingsSave() {
       long_run_threshold_min: +$("schedule-shift-threshold").value,
       auto_split: $("schedule-shift-auto-split").checked,
     };
-    st.shiftSettings = await api(`/api/routes/${st.route_id}/shift-settings/${encodeURIComponent(st.day_type)}`, { method: "PUT", body });
+    const saved = await api(`/api/routes/${routeId}/shift-settings/${encodeURIComponent(dayType)}`, { method: "PUT", body });
+    if (!scheduleMutationScopeCurrent(st, routeId, dayType)) return;
+    st.shiftSettings = saved;
+    st.shiftPreview = null;
     toast("Настройки смен сохранены");
-    route();
   } catch (error) {
+    if (!scheduleMutationScopeCurrent(st, routeId, dayType)) return;
     st.shiftSettingsError = error.message;
     const box = $("schedule-shift-settings-error");
     if (box) box.textContent = error.message;
     toast(error.message, true);
   } finally {
-    st.shiftSettingsSaving = false;
-    if (button && document.body.contains(button)) { button.disabled = false; button.textContent = "Сохранить настройки"; }
+    scheduleFinishShiftBusy(st);
   }
 }
 
@@ -1173,7 +1189,7 @@ function scheduleShiftPreviewPanel(st) {
     const outputConflicts = (output.conflicts || []).map(conflict => `<div class="schedule-shift-conflict" role="alert"><b>${esc(conflict.code)}</b> ${esc(conflict.message)}</div>`).join("");
     return `<section class="schedule-output-group"><h4>Выход ${esc(output.output_number)}</h4><div class="schedule-output-shifts">${cards || '<span class="muted">Смены не предложены.</span>'}</div>${outputConflicts}</section>`;
   }).join("");
-  const applyDisabled = !preview.preview_token || conflicts.length || st.shiftApplyLoading;
+  const applyDisabled = !preview.preview_token || conflicts.length || st.shiftBusy;
   return `<section class="panel schedule-shift-preview" aria-labelledby="schedule-shift-preview-title">
     <div class="schedule-preview-head"><div><h3 id="schedule-shift-preview-title">Предпросмотр плана смен</h3>
       <p class="muted"><b>Только просмотр:</b> расчёт не записывает output_shifts, рейсы или назначения водителей.</p></div><span class="badge b-inf">без записи</span></div>
@@ -1181,79 +1197,100 @@ function scheduleShiftPreviewPanel(st) {
       <div class="card"><div class="num">${esc(diff.old_driver_slots || 0)} → ${esc(diff.new_driver_slots || 0)}</div><div class="lbl">водительских мест</div></div></div>
     ${conflicts.length ? `<div class="schedule-shift-conflict" role="alert"><b>Применение заблокировано:</b> ${esc(conflicts.length)} конфликт(а).</div>` : ""}
     ${outputs}
-    <div class="toolbar"><button id="schedule-shift-apply" class="btn" onclick="scheduleShiftApply()" ${applyDisabled ? "disabled" : ""}>${st.shiftApplyLoading ? "Применение…" : "Применить смены"}</button>
-      <button class="btn ghost" onclick="_sched.shiftPreview=null;route()" ${st.shiftApplyLoading ? "disabled" : ""}>Отмена</button></div>
+    <div class="toolbar"><button id="schedule-shift-apply" class="btn" onclick="scheduleShiftApply()" ${applyDisabled ? "disabled" : ""}>${st.shiftBusyAction === "apply" ? "Применение…" : "Применить смены"}</button>
+      <button class="btn ghost" onclick="_sched.shiftPreview=null;route()" ${st.shiftBusy ? "disabled" : ""}>Отмена</button></div>
   </section>`;
 }
 
 async function scheduleShiftPreview() {
   const st = window._sched;
-  if (!st || st.shiftPreviewLoading) return;
-  st.shiftPreviewLoading = true;
+  if (!st || st.shiftBusy) return;
+  const routeId = +st.route_id;
+  const dayType = st.day_type;
+  st.shiftBusy = true;
+  st.shiftBusyAction = "preview";
+  scheduleSetShiftControlsDisabled(true);
   const button = $("schedule-shift-preview-button");
   if (button) { button.disabled = true; button.textContent = "Расчёт…"; }
   try {
-    st.shiftPreview = await api(`/api/routes/${st.route_id}/shift-generation/preview`, {
-      method: "POST", body: { day_type: st.day_type, preserve_locked: true },
+    const preview = await api(`/api/routes/${routeId}/shift-generation/preview`, {
+      method: "POST", body: { day_type: dayType, preserve_locked: true },
     });
-    route();
-  } catch (error) { toast(error.message, true); }
+    if (!scheduleMutationScopeCurrent(st, routeId, dayType)) return;
+    st.shiftPreview = preview;
+  } catch (error) {
+    if (scheduleMutationScopeCurrent(st, routeId, dayType)) toast(error.message, true);
+  }
   finally {
-    st.shiftPreviewLoading = false;
-    if (button && document.body.contains(button)) { button.disabled = false; button.textContent = "Предпросмотр смен"; }
+    scheduleFinishShiftBusy(st);
   }
 }
 
 async function scheduleShiftApply() {
   const st = window._sched;
   const preview = st && st.shiftPreview;
-  if (!preview || !preview.preview_token || (preview.conflicts || []).length || st.shiftApplyLoading) return;
+  if (!preview || !preview.preview_token || (preview.conflicts || []).length || st.shiftBusy) return;
   if (!confirm("Применить показанный план смен к выбранному маршруту и типу дня?")) return;
-  st.shiftApplyLoading = true;
+  const routeId = +st.route_id;
+  const dayType = st.day_type;
+  st.shiftPreview = null;
+  st.shiftBusy = true;
+  st.shiftBusyAction = "apply";
+  scheduleSetShiftControlsDisabled(true);
   const button = $("schedule-shift-apply");
   if (button) { button.disabled = true; button.textContent = "Применение…"; }
   try {
-    const result = await api(`/api/routes/${st.route_id}/shift-generation/apply`, {
-      method: "POST", body: { day_type: st.day_type, preview_token: preview.preview_token },
+    const result = await api(`/api/routes/${routeId}/shift-generation/apply`, {
+      method: "POST", body: { day_type: dayType, preview_token: preview.preview_token },
     });
+    if (!scheduleMutationScopeCurrent(st, routeId, dayType)) return;
     st.shiftPreview = null;
     toast(`Применено смен: ${result.shift_count}`);
-    route();
-  } catch (error) { toast(error.message, true); }
-  finally { st.shiftApplyLoading = false; }
+  } catch (error) {
+    if (scheduleMutationScopeCurrent(st, routeId, dayType)) toast(error.message, true);
+  }
+  finally { scheduleFinishShiftBusy(st); }
 }
 
 function scheduleOutputShifts(st) {
-  const structural = (st.outputShifts || []).filter(item => item.output_shift_id);
+  const structural = (st.outputShifts || []).filter(item => item.id);
+  const anyLocked = structural.some(item => item.is_manual_locked);
   const byOutput = {};
   structural.forEach(item => { (byOutput[item.output_number] = byOutput[item.output_number] || []).push(item); });
   const groups = Object.entries(byOutput).sort((a, b) => +a[0] - +b[0]).map(([outputNumber, shifts]) => {
+    const outputLocked = shifts.some(shift => shift.is_manual_locked);
     const cards = shifts.sort((a, b) => +a.shift_number - +b.shift_number).map(shift => {
       const type = scheduleShiftType(st, shift);
       const locked = shift.is_manual_locked;
-      const assignments = shift.assignment_count == null ? "" : `<span class="badge b-inf">назначений: ${esc(shift.assignment_count)}</span>`;
+      const assignments = shift.assignment_count == null ? "" : `<span class="badge b-inf">назначений всего: ${esc(shift.assignment_count)}</span>`;
+      const shiftId = +shift.id;
+      const disabled = st.shiftBusy ? "disabled" : "";
       return `<article class="schedule-shift-card ${locked ? "schedule-shift-locked" : ""}">
         <div class="schedule-shift-card-head"><span class="schedule-shift-type" style="--shift-color:${scheduleShiftColor(type.color)}">${esc(type.name)}</span><b>Смена ${esc(shift.shift_number)}</b></div>
         <div>${esc(scheduleShiftTripLabel(st, shift.trip_from_id))}–${esc(scheduleShiftTripLabel(st, shift.trip_to_id))}</div>
         <div class="muted">${esc(scheduleShiftClock(shift.start_sec))}–${esc(scheduleShiftClock(shift.end_sec))} · ${esc(scheduleShiftDuration(shift.start_sec, shift.end_sec))}</div>
         <div class="schedule-shift-meta"><span class="schedule-driver-slots" aria-label="Водительских мест: ${esc(shift.driver_slots)}">${"●".repeat(Math.max(1, +shift.driver_slots || 1))} ${esc(shift.driver_slots)} вод.</span>${assignments}</div>
         ${locked ? `<div class="schedule-shift-lock-reason"><b>Ручная блокировка</b>${shift.manual_reason ? `: ${esc(shift.manual_reason)}` : ""}</div>` : ""}
-        <div class="toolbar"><button class="btn small sec" onclick="scheduleShiftEdit(${+shift.output_shift_id})" aria-label="Изменить границы смены ${esc(shift.shift_number)}">Изменить границы</button>
-          <button class="btn small ghost" onclick="scheduleShiftReset('shift',${+shift.output_shift_id})" aria-label="Сбросить ручные изменения смены ${esc(shift.shift_number)}">Сбросить смену</button></div>
+        ${locked ? `<div class="toolbar"><button class="btn small sec" onclick="scheduleShiftEdit(${shiftId})" ${disabled} aria-label="Изменить границы смены ${esc(shift.shift_number)}">Изменить границы</button>
+          <button class="btn small ghost" onclick="scheduleShiftReset('shift',${shiftId})" ${disabled} aria-label="Сбросить ручные изменения смены ${esc(shift.shift_number)}">Сбросить смену</button></div>` :
+          `<div class="toolbar"><button class="btn small sec" onclick="scheduleShiftEdit(${shiftId})" ${disabled} aria-label="Изменить границы смены ${esc(shift.shift_number)}">Изменить границы</button></div>`}
       </article>`;
     }).join("");
-    return `<section class="schedule-output-group"><div class="schedule-output-head"><h4>Выход ${esc(outputNumber)}</h4><button class="btn small ghost" onclick="scheduleShiftReset('output',${+outputNumber})">Сбросить выход</button></div><div class="schedule-output-shifts">${cards}</div></section>`;
+    return `<section class="schedule-output-group"><div class="schedule-output-head"><h4>Выход ${esc(outputNumber)}</h4>${outputLocked ? `<button class="btn small ghost" onclick="scheduleShiftReset('output',${+outputNumber})" ${st.shiftBusy ? "disabled" : ""}>Сбросить выход</button>` : ""}</div><div class="schedule-output-shifts">${cards}</div></section>`;
   }).join("");
   return `<section class="panel schedule-output-shift-workspace" aria-labelledby="schedule-output-shifts-title">
-    <div class="schedule-preview-head"><div><h3 id="schedule-output-shifts-title">Сохранённые смены выходов</h3><p class="muted">Структурные смены для графика водителей${st.outputShiftDate ? ` · назначения на ${esc(st.outputShiftDate)}` : ""}.</p></div>
-      <button class="btn small ghost" onclick="scheduleShiftReset('day')" ${structural.length ? "" : "disabled"}>Сбросить день</button></div>
+    <div class="schedule-preview-head"><div><h3 id="schedule-output-shifts-title">Сохранённые смены выходов</h3><p class="muted">Структурные смены для графика водителей · назначения посчитаны за все даты (${esc(st.outputShiftAssignmentScope || "all_dates")}).</p></div>
+      ${anyLocked ? `<button class="btn small ghost" onclick="scheduleShiftReset('day')" ${st.shiftBusy ? "disabled" : ""}>Сбросить день</button>` : ""}</div>
     ${groups || '<div class="muted">Сохранённых структурных смен пока нет. Сначала выполните предпросмотр и применение.</div>'}
   </section>`;
 }
 
 async function scheduleShiftEdit(shiftId) {
   const st = window._sched;
-  const shift = (st.outputShifts || []).find(item => +item.output_shift_id === +shiftId);
+  if (!st || st.shiftBusy) return;
+  const routeId = +st.route_id;
+  const dayType = st.day_type;
+  const shift = (st.outputShifts || []).find(item => +item.id === +shiftId);
   if (!shift) return toast("Смена не найдена в текущем расписании", true);
   const trips = (st.scheduleTrips || []).filter(item => +item.output_number === +shift.output_number);
   const tripOptions = trips.map(item => [item.id, `Рейс ${item.trip_number} · ${item.dep_time}–${item.arr_time}`]);
@@ -1266,6 +1303,11 @@ async function scheduleShiftEdit(shiftId) {
   if (!values) return;
   const reason = String(values.reason || "").trim();
   if (!reason) return toast("Укажите причину ручного изменения", true);
+  if (!scheduleMutationScopeCurrent(st, routeId, dayType) || st.shiftBusy) return;
+  st.shiftPreview = null;
+  st.shiftBusy = true;
+  st.shiftBusyAction = "edit";
+  scheduleSetShiftControlsDisabled(true);
   try {
     await api(`/api/output-shifts/${+shiftId}`, { method: "PATCH", body: {
       trip_from_id: +values.trip_from_id,
@@ -1273,26 +1315,45 @@ async function scheduleShiftEdit(shiftId) {
       shift_type_id: +values.shift_type_id,
       reason,
     } });
+    if (!scheduleMutationScopeCurrent(st, routeId, dayType)) return;
+    st.shiftPreview = null;
     toast("Границы смены сохранены");
-    route();
-  } catch (error) { toast(error.message, true); }
+  } catch (error) {
+    if (scheduleMutationScopeCurrent(st, routeId, dayType)) toast(error.message, true);
+  }
+  finally { scheduleFinishShiftBusy(st); }
 }
 
 async function scheduleShiftReset(scope, value) {
   const st = window._sched;
-  if (!st || st.shiftResetLoading) return;
+  if (!st || st.shiftBusy) return;
+  const routeId = +st.route_id;
+  const dayType = st.day_type;
   const labels = { shift: "смену", output: "выход", day: "все смены дня" };
-  if (!labels[scope] || !confirm(`Сбросить ручные изменения: ${labels[scope]}?`)) return;
-  const body = { day_type: st.day_type };
+  const rows = st.outputShifts || [];
+  const hasLockedTarget = scope === "shift" ? rows.some(row => +row.id === +value && row.is_manual_locked) :
+    scope === "output" ? rows.some(row => +row.output_number === +value && row.is_manual_locked) :
+    scope === "day" ? rows.some(row => row.is_manual_locked) : false;
+  if (!labels[scope] || !hasLockedTarget) return;
+  const warning = `Сбросить ручные изменения: ${labels[scope]}? При регенерации существующие назначения водителей могут быть отвязаны; при необходимости их потребуется привязать заново.`;
+  if (!confirm(warning)) return;
+  if (!scheduleMutationScopeCurrent(st, routeId, dayType) || st.shiftBusy) return;
+  const body = { day_type: dayType };
   if (scope === "shift") body.shift_id = +value;
   if (scope === "output") body.output_number = +value;
-  st.shiftResetLoading = true;
+  st.shiftPreview = null;
+  st.shiftBusy = true;
+  st.shiftBusyAction = "reset";
+  scheduleSetShiftControlsDisabled(true);
   try {
-    await api(`/api/routes/${st.route_id}/output-shifts/reset-manual`, { method: "POST", body });
+    await api(`/api/routes/${routeId}/output-shifts/reset-manual`, { method: "POST", body });
+    if (!scheduleMutationScopeCurrent(st, routeId, dayType)) return;
+    st.shiftPreview = null;
     toast("Ручные изменения смен сброшены");
-    route();
-  } catch (error) { toast(error.message, true); }
-  finally { st.shiftResetLoading = false; }
+  } catch (error) {
+    if (scheduleMutationScopeCurrent(st, routeId, dayType)) toast(error.message, true);
+  }
+  finally { scheduleFinishShiftBusy(st); }
 }
 
 
@@ -1431,20 +1492,32 @@ VIEWS.schedule = async function () {
   const st = window._sched || { route_id: REFS.routes[0] ? REFS.routes[0].id : 0, day_type: "\u0431\u0443\u0434\u043d\u0438", q: "" };
   window._sched = st;
   if (!st.route_id) { $("content").innerHTML = "<div class='panel'>\u0421\u043d\u0430\u0447\u0430\u043b\u0430 \u0441\u043e\u0437\u0434\u0430\u0439\u0442\u0435 \u043c\u0430\u0440\u0448\u0440\u0443\u0442 \u0432 \u0441\u043f\u0440\u0430\u0432\u043e\u0447\u043d\u0438\u043a\u0435.</div>"; return; }
-  const [tr, chk, sum, matrix, shiftTypes, shiftSettings, outputShifts] = await Promise.all([
-    api(`/api/trips?route_id=${st.route_id}&day_type=${encodeURIComponent(st.day_type)}`),
-    api(`/api/routes/${st.route_id}/check?day_type=${encodeURIComponent(st.day_type)}`),
-    api(`/api/routes/${st.route_id}/schedule-summary?day_type=${encodeURIComponent(st.day_type)}`),
-    api(`/api/routes/${st.route_id}/stop-times?day_type=${encodeURIComponent(st.day_type)}`),
-    api("/api/shift-types"),
-    api(`/api/routes/${st.route_id}/shift-settings/${encodeURIComponent(st.day_type)}`),
-    scheduleLoadOutputShifts(st.route_id, st.day_type),
-  ]);
+  const routeId = +st.route_id;
+  const dayType = st.day_type;
+  st.scheduleLoadEpoch = st.scheduleLoadEpoch || 0;
+  const loadEpoch = ++st.scheduleLoadEpoch;
+  let loaded;
+  try {
+    loaded = await Promise.all([
+      api(`/api/trips?route_id=${routeId}&day_type=${encodeURIComponent(dayType)}`),
+      api(`/api/routes/${routeId}/check?day_type=${encodeURIComponent(dayType)}`),
+      api(`/api/routes/${routeId}/schedule-summary?day_type=${encodeURIComponent(dayType)}`),
+      api(`/api/routes/${routeId}/stop-times?day_type=${encodeURIComponent(dayType)}`),
+      api("/api/shift-types"),
+      api(`/api/routes/${routeId}/shift-settings/${encodeURIComponent(dayType)}`),
+      scheduleLoadOutputShifts(routeId, dayType),
+    ]);
+  } catch (error) {
+    if (!scheduleScopeCurrent(st, routeId, dayType, loadEpoch)) return;
+    throw error;
+  }
+  const [tr, chk, sum, matrix, shiftTypes, shiftSettings, outputShifts] = loaded;
+  if (!scheduleScopeCurrent(st, routeId, dayType, loadEpoch)) return;
   st.scheduleTrips = tr.items;
   st.shiftTypes = shiftTypes.items || [];
   st.shiftSettings = shiftSettings;
   st.outputShifts = outputShifts.items;
-  st.outputShiftDate = outputShifts.date;
+  st.outputShiftAssignmentScope = outputShifts.assignment_count_scope;
   const q = (st.q || "").toLowerCase();
   const problemsByTrip = tripProblemMap(chk.problems);
   const visibleTrips = tr.items.filter(t => !q || JSON.stringify(t).toLowerCase().includes(q));
