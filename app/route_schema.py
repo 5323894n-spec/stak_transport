@@ -268,6 +268,10 @@ def migrate_route_network(con):
         "output_shift_id",
         "INTEGER REFERENCES output_shifts(id)",
     )
+    con.execute(
+        "CREATE INDEX IF NOT EXISTS idx_roster_assignments_output_shift_date "
+        "ON roster_assignments(output_shift_id,date)"
+    )
     con.executemany(
         """
         INSERT OR IGNORE INTO shift_types(

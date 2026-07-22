@@ -321,6 +321,14 @@ def route_output_shifts_list(route_id: int, day_type: str = "",
         con.close()
 
 
+def safe_excel_text(value):
+    """Return text that Excel will never interpret as a formula."""
+    text = "" if value is None else str(value)
+    if text.lstrip().startswith(("=", "+", "-", "@")):
+        return "'" + text
+    return text
+
+
 def _service_clock(seconds):
     seconds = int(seconds)
     return f"{seconds // 3600:02d}:{seconds % 3600 // 60:02d}"
@@ -402,10 +410,10 @@ def route_output_shifts_export(route_id: int, day_type: str = "",
     con = db.connect()
     try:
         route = _route_or_404(con, route_id)
-        count_where = "WHERE output_shift_id IS NOT NULL"
+        count_date_clause = ""
         query_args = []
         if parsed_date:
-            count_where += " AND date=?"
+            count_date_clause = "AND ra.date=?"
             query_args.append(parsed_date.isoformat())
         rows = db.rows(con.execute(
             f"""
@@ -416,17 +424,13 @@ def route_output_shifts_export(route_id: int, day_type: str = "",
                    os.start_sec, os.end_sec, os.driver_slots,
                    os.handover_after_min, os.source, os.is_manual_locked,
                    os.manual_reason,
-                   COALESCE(assignments.assignment_count, 0) AS assignment_count
+                   (SELECT COUNT(*) FROM roster_assignments ra
+                    WHERE ra.output_shift_id=os.id {count_date_clause}
+                   ) AS assignment_count
             FROM output_shifts os
             JOIN shift_types st ON st.id=os.shift_type_id
             JOIN route_trips first_trip ON first_trip.id=os.trip_from_id
             JOIN route_trips last_trip ON last_trip.id=os.trip_to_id
-            LEFT JOIN (
-              SELECT output_shift_id, COUNT(*) AS assignment_count
-              FROM roster_assignments
-              {count_where}
-              GROUP BY output_shift_id
-            ) assignments ON assignments.output_shift_id=os.id
             WHERE os.route_id=? AND os.day_type=?
             ORDER BY os.output_number,os.shift_number,os.id
             """,
@@ -447,9 +451,11 @@ def route_output_shifts_export(route_id: int, day_type: str = "",
         sheet = workbook.active
         _prepare_shift_export_sheet(
             sheet,
-            title=f"Смены выходов маршрута № {route['number']}",
-            metadata=(f"{route.get('name') or 'Без наименования'} · "
-                      f"тип дня: {day_type} · {count_scope}"),
+            title=safe_excel_text(f"Смены выходов маршрута № {route['number']}"),
+            metadata=safe_excel_text(
+                f"{route.get('name') or 'Без наименования'} · "
+                f"тип дня: {day_type} · {count_scope}"
+            ),
             headers=headers,
             widths=widths,
         )
@@ -457,13 +463,16 @@ def route_output_shifts_export(route_id: int, day_type: str = "",
             duration_min = (int(item["end_sec"]) - int(item["start_sec"])) // 60
             sheet.append([
                 int(item["output_number"]), int(item["shift_number"]),
-                item["shift_type_name"],
-                f"{item['trip_from_number']}–{item['trip_to_number']}",
+                safe_excel_text(item["shift_type_name"]),
+                safe_excel_text(
+                    f"{item['trip_from_number']}–{item['trip_to_number']}"
+                ),
                 _service_clock(item["start_sec"]), _service_clock(item["end_sec"]),
                 duration_min, duration_min / 60, int(item["driver_slots"]),
-                int(item["handover_after_min"]), item["source"],
-                "Да" if item["is_manual_locked"] else "Нет",
-                item["manual_reason"] or "", int(item["assignment_count"]),
+                int(item["handover_after_min"]), safe_excel_text(item["source"]),
+                safe_excel_text("Да" if item["is_manual_locked"] else "Нет"),
+                safe_excel_text(item["manual_reason"]),
+                int(item["assignment_count"]),
             ])
             fill = None
             if item["is_manual_locked"]:

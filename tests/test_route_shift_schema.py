@@ -49,5 +49,10 @@ def test_stage_four_shift_schema_and_defaults_are_repeat_safe(tmp_path):
         }
         assert "output_shift_id" in trip_columns
         assert "output_shift_id" in roster_columns
+        roster_indexes = {
+            row[1]
+            for row in con.execute("PRAGMA index_list(roster_assignments)")
+        }
+        assert "idx_roster_assignments_output_shift_date" in roster_indexes
     finally:
         con.close()

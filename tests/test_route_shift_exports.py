@@ -220,3 +220,39 @@ def test_output_shift_export_rejects_noncanonical_or_impossible_date(
         f"/api/routes/{route_id}/output-shifts/export.xlsx?day_type={DAY_TYPE}&service_date={service_date}"
     )
     assert response.status_code == 400
+
+
+def test_output_shift_export_escapes_formula_like_text(tmp_path):
+    client = _client(tmp_path)
+    route_id = _seed_export_data()
+    import app.db as db
+
+    con = db.connect()
+    try:
+        con.execute(
+            "UPDATE routes SET number=?,name=? WHERE id=?",
+            ("=2+2", "  +SUM(1,1)", route_id),
+        )
+        con.execute(
+            "UPDATE shift_types SET name='@dangerous_type' WHERE code='single_8h'"
+        )
+        con.execute(
+            "UPDATE output_shifts SET source=?,manual_reason=? "
+            "WHERE route_id=? AND is_manual_locked=1",
+            ("-dangerous_source", " =HYPERLINK(\"bad\")", route_id),
+        )
+        con.commit()
+    finally:
+        con.close()
+
+    _, workbook = _export(client, route_id)
+    sheet = workbook.active
+    assert sheet["A1"].data_type != "f"
+    assert sheet["A2"].data_type != "f"
+    assert sheet["A2"].value.startswith("'  +SUM")
+    assert sheet["C4"].value == "'@dangerous_type"
+    assert sheet["K4"].value == "'-dangerous_source"
+    assert sheet["L4"].value == "Да"
+    assert sheet["M4"].value == "' =HYPERLINK(\"bad\")"
+    for coordinate in ("C4", "D4", "K4", "L4", "M4"):
+        assert sheet[coordinate].data_type == "s"
