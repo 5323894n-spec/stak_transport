@@ -479,8 +479,12 @@ VIEWS.summarySchedule = async function () {
 };
 
 VIEWS.dashboard = async function () {
-  const d = await api("/api/dashboard");
-  const notif = await api("/api/notifications");
+  const [d, notif, maintenanceData] = await Promise.all([
+    api("/api/dashboard"),
+    api("/api/notifications"),
+    api("/api/repairs/maintenance/plans"),
+  ]);
+  const maintenance = maintenanceData.items || [];
   const unseen = notif.items.filter(n => !n.seen);
   $("notif-badge").innerHTML = unseen.length ? `<span class="badge b-err">уведомлений: ${unseen.length}</span>` : "";
   const card = (n, l, cls) => `<div class="card ${cls || ""}"><div class="num">${n}</div><div class="lbl">${l}</div></div>`;
