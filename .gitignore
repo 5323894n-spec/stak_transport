@@ -31,4 +31,5 @@ build/
 .superpowers/
 
 # Isolated feature worktree
+.worktrees/
 kartavto/vehicle-card/
