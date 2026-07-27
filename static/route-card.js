@@ -214,6 +214,25 @@ function routeCardMap(state) {
     <div class="route-map-legend">${geo}<span>● остановка</span><span>— последовательность движения</span></div>${routeOsrmDiff(state)}`;
 }
 
+let routeMapInstance = null;
+let routeMapTileTimer = null;
+
+function routeCardDestroyMap() {
+  if (routeMapTileTimer) clearTimeout(routeMapTileTimer);
+  routeMapTileTimer = null;
+  if (routeMapInstance) routeMapInstance.remove();
+  routeMapInstance = null;
+}
+
+function routeCardGeometryPoints(state, rows) {
+  const coordinates = state.geometry && state.geometry.coordinates;
+  if (Array.isArray(coordinates) && coordinates.length && coordinates.every(point =>
+    Array.isArray(point) && point.length >= 2 && Number.isFinite(+point[0]) && Number.isFinite(+point[1]))) {
+    return coordinates.map(point => [+point[1], +point[0]]);
+  }
+  return rows.map(row => [+row.stop.latitude, +row.stop.longitude]);
+}
+
 function routeCardShowMapFallback(message = "Подложка OpenStreetMap недоступна") {
   const canvas = document.querySelector(".route-map-canvas");
   const fallback = document.querySelector(".route-map-fallback");
@@ -223,7 +242,7 @@ function routeCardShowMapFallback(message = "Подложка OpenStreetMap не
   if (warning) { warning.textContent = message; warning.hidden = false; }
 }
 
-function routeCardBindMap(state) {
+function routeCardBindFallbackDrag(state) {
   const svg = document.querySelector(".route-map-fallback svg");
   if (!svg || !state.mapBounds) return;
   let drag = null;
@@ -261,6 +280,70 @@ function routeCardBindMap(state) {
   });
 }
 
+function routeCardBindMap(state) {
+  const rows = routeCardDraft(state).filter(row => row.stop.latitude != null && row.stop.longitude != null);
+  const canvas = document.querySelector(".route-map-canvas");
+  const fallback = document.querySelector(".route-map-fallback");
+  if (!rows.length || !canvas || !window.L) {
+    routeCardShowMapFallback();
+    routeCardBindFallbackDrag(state);
+    return;
+  }
+  try {
+    canvas.hidden = false;
+    if (fallback) fallback.hidden = true;
+    const map = window.L.map(canvas);
+    routeMapInstance = map;
+    let tileLoads = 0, tileErrors = 0;
+    const tileLayer = window.L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+      maxZoom: 19,
+      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+    }).addTo(map);
+    tileLayer.on("tileload", () => {
+      tileLoads += 1;
+      if (routeMapInstance !== map) return;
+      if (routeMapTileTimer) clearTimeout(routeMapTileTimer);
+      routeMapTileTimer = null;
+    });
+    tileLayer.on("tileerror", () => { tileErrors += 1; });
+    const line = routeCardGeometryPoints(state, rows);
+    if (line.length > 1) {
+      window.L.polyline(line, { color: "white", weight: 10 }).addTo(map);
+      window.L.polyline(line, { color: "#2563eb", weight: 6 }).addTo(map);
+    }
+    rows.forEach((row, index) => {
+      const original = [+row.stop.latitude, +row.stop.longitude];
+      const endpointClass = index === 0 ? " route-map-marker-start" : index === rows.length - 1 ? " route-map-marker-end" : "";
+      const icon = window.L.divIcon({ className: `route-map-marker${endpointClass}`, html: `<span>${index + 1}</span>` });
+      const marker = window.L.marker(original, { icon, draggable: true }).addTo(map);
+      marker.bindTooltip(`${index + 1}. ${esc(row.stop.name)}`);
+      marker.on("dragend", async () => {
+        const point = marker.getLatLng(), latitude = point.lat, longitude = point.lng;
+        try {
+          await api(`/api/stops/${row.stop_id}`, { method: "PUT", body: { latitude, longitude } });
+          row.stop.latitude = latitude; row.stop.longitude = longitude;
+          toast("Координаты остановки сохранены");
+        } catch (error) {
+          marker.setLatLng(original);
+          toast(error.message, true);
+        }
+      });
+    });
+    if (rows.length === 1) map.setView(line[0], 15);
+    else map.fitBounds(line, { padding: [36, 36], maxZoom: 17 });
+    routeMapTileTimer = setTimeout(() => {
+      if (!tileLoads && routeMapInstance === map) {
+        routeCardDestroyMap();
+        routeCardShowMapFallback();
+        routeCardBindFallbackDrag(state);
+      }
+    }, 8000);
+  } catch (error) {
+    routeCardDestroyMap();
+    routeCardShowMapFallback();
+    routeCardBindFallbackDrag(state);
+  }
+}
 function routeDiffTable(diff) {
   const rows = (diff || []).map(item => `<tr><td>${esc(item.sequence)}</td><td>${esc(item.old_distance_km)}</td><td><b>${esc(item.new_distance_km)}</b></td><td>${esc(item.old_run_time_sec)}</td><td><b>${esc(item.new_run_time_sec)}</b></td></tr>`).join("");
   return `<div class="route-diff">${tbl(["Остановка №", "Было, км", "Станет, км", "Было, сек", "Станет, сек"], rows)}</div>`;
@@ -524,6 +607,7 @@ function routeCardBody(state) {
 }
 
 function renderRouteCard(state) {
+  routeCardDestroyMap();
   const tabs = ROUTE_CARD_TABS.map(([key, label]) => `<button class="route-tab ${state.tab === key ? "on" : ""}" onclick="routeCardTab('${key}')">${esc(label)}</button>`).join("");
   $("content").innerHTML = `<div class="route-card">${routeCardHeader(state)}<nav class="route-tabs" aria-label="Разделы карточки маршрута">${tabs}</nav><div class="route-card-body">${routeCardBody(state)}</div></div>`;
   if (state.tab === "map") routeCardBindMap(state);

@@ -44,3 +44,27 @@ def test_route_card_keeps_svg_fallback_beside_the_map_canvas():
     assert "Подложка OpenStreetMap недоступна" in source
     assert '<div class="route-map"><div class="route-map-canvas" hidden></div><div class="route-map-fallback">' in compact_source
     assert 'class="vio w route-map-warning" role="status" aria-live="polite" hidden' in source
+
+
+def test_route_card_builds_and_cleans_up_leaflet_map():
+    source = (ROOT / "static" / "route-card.js").read_text(encoding="utf-8")
+
+    assert "function routeCardDestroyMap" in source
+    assert "function routeCardGeometryPoints" in source
+    assert "window.L.map" in source
+    assert 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png' in source
+    assert '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors' in source
+    assert 'tileLayer.on("tileerror"' in source
+    assert "routeMapInstance.remove()" in source
+    assert "fitBounds" in source
+
+
+def test_route_card_leaflet_markers_are_draggable_and_persist_coordinates():
+    source = (ROOT / "static" / "route-card.js").read_text(encoding="utf-8")
+
+    assert "draggable: true" in source
+    assert 'marker.on("dragend"' in source
+    assert "marker.setLatLng(original)" in source
+    assert 'method: "PUT"' in source
+    assert "row.stop.latitude = latitude" in source
+    assert "row.stop.longitude = longitude" in source
