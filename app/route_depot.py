@@ -274,12 +274,17 @@ def _unique_named_stop(con, item, name):
     coordinates = _coordinate_pair(item)
     if coordinates:
         latitude, longitude = coordinates
-        coordinate_matches = [
-            row for row in candidates
-            if row.get("latitude") is not None and row.get("longitude") is not None
-            and abs(float(row["latitude"]) - latitude) <= 0.000001
-            and abs(float(row["longitude"]) - longitude) <= 0.000001
-        ]
+        coordinate_matches = []
+        for row in candidates:
+            candidate_coordinates = _coordinate_pair(row)
+            if candidate_coordinates is None:
+                continue
+            candidate_latitude, candidate_longitude = candidate_coordinates
+            if (
+                abs(candidate_latitude - latitude) <= 0.000001
+                and abs(candidate_longitude - longitude) <= 0.000001
+            ):
+                coordinate_matches.append(row)
         if len(coordinate_matches) == 1:
             return coordinate_matches[0]
     return None

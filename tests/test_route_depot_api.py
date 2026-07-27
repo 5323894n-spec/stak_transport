@@ -713,3 +713,36 @@ def test_legacy_stop_resolver_leaves_ambiguous_name_unresolved(client, route_id)
     assert row["stop_id"] is None
     assert row["stop"]["id"] is None
     assert row["stop"]["name"] == "Центральная"
+
+
+def test_legacy_coordinate_resolver_skips_bad_candidate_and_matches_both_axes(
+    client, route_id
+):
+    bad = client.post("/api/stops", json={
+        "name": "Центральная",
+        "external_code": "A",
+        "latitude": "bad",
+        "longitude": "Infinity",
+    })
+    assert bad.status_code == 200, bad.text
+    expected_id = _create_named_stop(
+        client, "B", "Улица Вторая", 56.2, 35.2
+    )
+    _set_legacy_stops(route_id, [
+        _legacy_stop(
+            None,
+            "Центральная",
+            lat=56.2000004,
+            lon=35.1999996,
+        )
+    ])
+
+    response = client.get(
+        f"/api/routes/{route_id}/depot-stops?direction=depot_out"
+    )
+
+    assert response.status_code == 200, response.text
+    row = response.json()["items"][0]
+    assert row["stop_id"] == expected_id
+    assert row["stop"]["latitude"] == 56.2
+    assert row["stop"]["longitude"] == 35.2
