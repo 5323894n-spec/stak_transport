@@ -53,6 +53,20 @@ def test_route_card_keeps_svg_fallback_beside_the_map_canvas():
     assert 'class="vio w route-map-warning" role="status" aria-live="polite" hidden' in source
 
 
+def test_route_map_styles_own_responsive_screen_and_print_sizing():
+    styles = (ROOT / "static" / "styles.css").read_text(encoding="utf-8")
+    index = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
+
+    assert ".route-map-canvas" in styles
+    assert ".route-map-fallback" in styles
+    assert ".route-leaflet-marker" in styles
+    assert "height: 460px" in styles
+    assert "height: 320px" in styles
+    assert "@media print" in styles
+    assert 'styles.css?v=3.2&amp;route=3.7' in index
+    assert 'route-card.js?v=3.5' in index
+
+
 def test_route_card_builds_and_cleans_up_leaflet_map():
     source = (ROOT / "static" / "route-card.js").read_text(encoding="utf-8")
 
@@ -64,8 +78,8 @@ def test_route_card_builds_and_cleans_up_leaflet_map():
     assert 'tileLayer.on("tileerror"' in source
     assert "routeMapInstance.remove()" in source
     assert "fitBounds" in source
-    assert 'canvas.style.width = "100%"' in source
-    assert 'canvas.style.height = "390px"' in source
+    assert 'canvas.style.width = "100%"' not in source
+    assert 'canvas.style.height = "390px"' not in source
 
 
 def test_route_card_leaflet_markers_are_draggable_and_persist_coordinates():

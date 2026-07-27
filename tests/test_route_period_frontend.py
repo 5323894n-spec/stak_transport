@@ -26,4 +26,4 @@ def test_period_styles_and_route_cache_version_are_present():
     for class_name in ("route-period-grid", "route-period-row", "route-period-timeline",
                        "route-period-block", "route-demand-grid", "route-demand-jump"):
         assert "." + class_name in styles
-    assert "route=3.6" in index
+    assert "route=3.7" in index

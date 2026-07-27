@@ -292,8 +292,6 @@ function routeCardBindMap(state) {
   }
   try {
     canvas.hidden = false;
-    canvas.style.width = "100%";
-    canvas.style.height = "390px";
     if (fallback) fallback.hidden = true;
     const map = window.L.map(canvas);
     routeMapInstance = map;
