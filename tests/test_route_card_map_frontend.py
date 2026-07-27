@@ -14,6 +14,12 @@ def test_leaflet_is_vendored_and_loaded_before_route_card():
 
     assert leaflet_js.stat().st_size > 100_000
     assert leaflet_css.stat().st_size > 10_000
+    assert sha256(leaflet_js.read_bytes()).hexdigest() == (
+        "db49d009c841f5ca34a888c96511ae936fd9f5533e90d8b2c4d57596f4e5641a"
+    )
+    assert sha256(leaflet_css.read_bytes()).hexdigest() == (
+        "a7837102824184820dfa198d1ebcd109ff6d0ff9a2672a074b9a1b4d147d04c6"
+    )
     license_bytes = license_file.read_bytes()
     license_text = license_bytes.decode("utf-8")
     assert "Copyright (c) 2010-2023, Volodymyr Agafonkin" in license_text
