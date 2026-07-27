@@ -316,7 +316,12 @@ function routeCardBindMap(state) {
       let committed = [+row.stop.latitude, +row.stop.longitude];
       let saving = false;
       const endpointClass = index === 0 ? " route-map-marker-start" : index === rows.length - 1 ? " route-map-marker-end" : "";
-      const icon = window.L.divIcon({ className: `route-map-marker${endpointClass}`, html: `<span>${index + 1}</span>` });
+      const icon = window.L.divIcon({
+        className: `route-map-marker${endpointClass}`,
+        html: `<span>${index + 1}</span>`,
+        iconSize: [28, 28],
+        iconAnchor: [14, 14],
+      });
       const marker = window.L.marker(committed, { icon, draggable: true }).addTo(map);
       marker.bindTooltip(`${index + 1}. ${esc(row.stop.name)}`);
       marker.on("dragend", async () => {

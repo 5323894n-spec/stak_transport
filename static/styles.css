@@ -256,6 +256,7 @@ label.f > * { display: block; width: 100%; margin-top: 3px; color: var(--text); 
   .route-card-head { padding: 8px; }
   .route-period-actions, .route-template-actions { display: none !important; }
   .route-period-row { break-inside: avoid; }
+  .route-map { min-height: 360px; }
   .route-map-canvas { display: none !important; }
   .route-map-fallback { display: block !important; height: 360px; }
   .route-map-fallback svg { display: block !important; }
