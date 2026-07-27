@@ -428,6 +428,62 @@ def test_legacy_erm_fallback_combines_all_page_sections(client, route_id):
     assert json.loads(rows[-1]["source_detail"])["section"] == 2
 
 
+@pytest.mark.parametrize(
+    "legacy_distance", ["1e999", float("nan"), float("inf"), -0.5]
+)
+def test_legacy_erm_fallback_sanitizes_invalid_distance(
+    client, route_id, legacy_distance
+):
+    import math
+
+    import app.db as db
+
+    stop_id = _create_stop(client, "Автопарк", "300")
+    notes = {
+        "source": "ЭРМ",
+        "details": {
+            "sheets": {
+                "из парка": {
+                    "sections": [{
+                        "sheet": "из парка",
+                        "kind": "из парка",
+                        "direction": "из парка",
+                        "stops": [{
+                            "seq": 1,
+                            "stop_id": 300,
+                            "stop_name": "Автопарк",
+                            "distance_km": legacy_distance,
+                            "travel_time": "00:01:00",
+                        }],
+                    }],
+                }
+            }
+        },
+    }
+    con = db.connect()
+    try:
+        con.execute(
+            "UPDATE routes SET notes=? WHERE id=?",
+            (json.dumps(notes, ensure_ascii=False), route_id),
+        )
+        con.commit()
+    finally:
+        con.close()
+
+    response = client.get(
+        f"/api/routes/{route_id}/depot-stops?direction=depot_out"
+    )
+
+    assert response.status_code == 200, response.text
+    assert "NaN" not in response.text
+    assert "Infinity" not in response.text
+    row = response.json()["items"][0]
+    assert row["stop_id"] == stop_id
+    assert row["distance_from_prev_km"] == 0
+    assert math.isfinite(row["cumulative_km"])
+    assert row["cumulative_km"] >= 0
+
+
 def test_normalized_depot_rows_take_priority_over_legacy_notes(client, route_id):
     import app.db as db
 

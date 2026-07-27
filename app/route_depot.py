@@ -67,6 +67,30 @@ def _nonnegative_distance(value):
     return round(result, 3)
 
 
+def _next_cumulative_km(cumulative_km, distance):
+    result = cumulative_km + distance
+    if not math.isfinite(result):
+        raise ValueError("Накопленное расстояние должно быть конечным числом")
+    return round(result, 3)
+
+
+def _safe_legacy_distance(value):
+    try:
+        return _nonnegative_distance(0 if value in (None, "") else value)
+    except (TypeError, ValueError, OverflowError):
+        return 0.0
+
+
+def _legacy_distance(item):
+    value = item.get("distance_km")
+    if value is None and item.get("distance_m") is not None:
+        try:
+            value = _decimal(item["distance_m"], "Расстояние") / Decimal(1000)
+        except ValueError:
+            return 0.0
+    return _safe_legacy_distance(value)
+
+
 def normalize_items(items):
     """Проверить, упорядочить и дополнить строки накопительными итогами."""
     if not isinstance(items, list):
@@ -102,10 +126,7 @@ def normalize_items(items):
     cumulative_day_sec = 0
     cumulative_night_sec = 0
     for item in normalized:
-        cumulative_km += item["distance_from_prev_km"]
-        if not math.isfinite(cumulative_km):
-            raise ValueError("Накопленное расстояние должно быть конечным числом")
-        cumulative_km = round(cumulative_km, 3)
+        cumulative_km = _next_cumulative_km(cumulative_km, item["distance_from_prev_km"])
         cumulative_day_sec += item["run_time_day_sec"]
         cumulative_night_sec += item["run_time_night_sec"]
         if cumulative_day_sec > _SQLITE_INTEGER_MAX:
@@ -146,9 +167,16 @@ def _with_cumulative(rows):
     cumulative_day_sec = 0
     cumulative_night_sec = 0
     for row in rows:
-        cumulative_km = round(cumulative_km + float(row["distance_from_prev_km"] or 0), 3)
+        distance = _safe_legacy_distance(row.get("distance_from_prev_km"))
+        try:
+            cumulative_km = _next_cumulative_km(cumulative_km, distance)
+        except ValueError:
+            distance = 0.0
+        row["distance_from_prev_km"] = distance
         cumulative_day_sec += int(row["run_time_day_sec"] or 0)
         cumulative_night_sec += int(row["run_time_night_sec"] or 0)
+        if not math.isfinite(cumulative_km):
+            cumulative_km = 0.0
         row["cumulative_km"] = cumulative_km
         row["cumulative_day_sec"] = cumulative_day_sec
         row["cumulative_night_sec"] = cumulative_night_sec
@@ -270,12 +298,7 @@ def _legacy_rows(con, route, direction):
             if not isinstance(item, dict):
                 continue
             stop = _stop_by_legacy_identity(con, item)
-            distance = item.get("distance_km")
-            if distance is None and item.get("distance_m") is not None:
-                try:
-                    distance = float(item["distance_m"]) / 1000
-                except (TypeError, ValueError):
-                    distance = 0
+            distance = _legacy_distance(item)
             runtime = _travel_seconds(item.get("travel_time"))
             rows.append({
                 "id": None,
@@ -283,7 +306,7 @@ def _legacy_rows(con, route, direction):
                 "direction": direction,
                 "stop_id": stop["id"],
                 "sequence": len(rows) + 1,
-                "distance_from_prev_km": round(max(0.0, float(distance or 0)), 3),
+                "distance_from_prev_km": distance,
                 "run_time_day_sec": runtime,
                 "run_time_night_sec": runtime,
                 "source": "legacy_erm",
