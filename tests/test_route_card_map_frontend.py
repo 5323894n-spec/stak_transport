@@ -84,6 +84,16 @@ def test_route_card_builds_and_cleans_up_leaflet_map():
     assert 'canvas.style.height = "390px"' not in source
 
 
+
+def test_spa_navigation_destroys_leaflet_map_before_replacing_content():
+    app_source = (ROOT / "static" / "app.js").read_text(encoding="utf-8")
+    route_body = function_body(app_source, "route")
+
+    cleanup = 'if (typeof routeCardDestroyMap === "function") routeCardDestroyMap();'
+    assert cleanup in route_body
+    assert route_body.index(cleanup) < route_body.index('$("content").innerHTML')
+
+
 def test_route_card_leaflet_markers_are_draggable_and_persist_coordinates():
     source = (ROOT / "static" / "route-card.js").read_text(encoding="utf-8")
 
@@ -102,6 +112,19 @@ def test_route_card_leaflet_markers_are_draggable_and_persist_coordinates():
     assert 'method: "PUT"' in source
     assert "row.stop.latitude = latitude" in source
     assert "row.stop.longitude = longitude" in source
+
+
+
+def test_route_map_marker_labels_keep_full_stop_sequence_when_coordinates_are_missing():
+    source = (ROOT / "static" / "route-card.js").read_text(encoding="utf-8")
+    points = function_body(source, "routeMapPoints")
+    bind = function_body(source, "routeCardBindMap")
+
+    assert ".map((row, index) => ({ row, sequence: index + 1 }))" in points
+    assert "${p.sequence}. ${esc(p.row.stop.name)}" in source
+    assert ".map((row, index) => ({ row, sequence: index + 1 }))" in bind
+    assert "html: `<span>${sequence}</span>`" in bind
+    assert "marker.bindTooltip(`${sequence}. ${esc(row.stop.name)}`)" in bind
 
 
 def test_route_card_clears_stale_osrm_geometry_on_direction_change_and_cancel():

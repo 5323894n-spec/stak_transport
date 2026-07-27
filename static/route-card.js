@@ -187,20 +187,22 @@ function routeCardSegment(index, field, value) {
 }
 
 function routeMapPoints(state) {
-  const rows = routeCardDraft(state).filter(row => row.stop.latitude != null && row.stop.longitude != null);
+  const plottedRows = routeCardDraft(state).map((row, index) => ({ row, sequence: index + 1 }))
+    .filter(item => item.row.stop.latitude != null && item.row.stop.longitude != null);
+  const rows = plottedRows.map(item => item.row);
   if (!rows.length) return { rows: [], points: [] };
   const lats = rows.map(r => +r.stop.latitude), lons = rows.map(r => +r.stop.longitude);
   let minLat = Math.min(...lats), maxLat = Math.max(...lats), minLon = Math.min(...lons), maxLon = Math.max(...lons);
   if (minLat === maxLat) { minLat -= .01; maxLat += .01; }
   if (minLon === maxLon) { minLon -= .01; maxLon += .01; }
   state.mapBounds = { minLat, maxLat, minLon, maxLon };
-  const points = rows.map(row => ({ row, x: 35 + ((+row.stop.longitude - minLon) / (maxLon - minLon)) * 730, y: 325 - ((+row.stop.latitude - minLat) / (maxLat - minLat)) * 280 }));
+  const points = plottedRows.map(item => ({ row: item.row, sequence: item.sequence, x: 35 + ((+item.row.stop.longitude - minLon) / (maxLon - minLon)) * 730, y: 325 - ((+item.row.stop.latitude - minLat) / (maxLat - minLat)) * 280 }));
   return { rows, points };
 }
 
 function routeCardFallbackMap(state, plotted = routeMapPoints(state)) {
   const line = plotted.points.map(p => `${p.x},${p.y}`).join(" ");
-  const nodes = plotted.points.map((p, i) => `<g class="route-map-node" data-route-stop-id="${p.row.stop_id}"><circle cx="${p.x}" cy="${p.y}" r="8"></circle><text x="${p.x + 11}" y="${p.y - 10}">${i + 1}. ${esc(p.row.stop.name)}</text></g>`).join("");
+  const nodes = plotted.points.map(p => `<g class="route-map-node" data-route-stop-id="${p.row.stop_id}"><circle cx="${p.x}" cy="${p.y}" r="8"></circle><text x="${p.x + 11}" y="${p.y - 10}">${p.sequence}. ${esc(p.row.stop.name)}</text></g>`).join("");
   return plotted.points.length ? `<svg viewBox="0 0 800 360" role="img" aria-label="Схема трассы без картографической подложки"><polyline points="${line}"></polyline>${nodes}</svg>` : '<div class="route-empty">Для схемы добавьте координаты остановок</div>';
 }
 
@@ -282,7 +284,8 @@ function routeCardBindFallbackDrag(state) {
 }
 
 function routeCardBindMap(state) {
-  const rows = routeCardDraft(state).filter(row => row.stop.latitude != null && row.stop.longitude != null);
+  const rows = routeCardDraft(state).map((row, index) => ({ row, sequence: index + 1 }))
+    .filter(item => item.row.stop.latitude != null && item.row.stop.longitude != null);
   const canvas = document.querySelector(".route-map-canvas");
   const fallback = document.querySelector(".route-map-fallback");
   if (!rows.length || !canvas || !window.L) {
@@ -307,23 +310,23 @@ function routeCardBindMap(state) {
       routeMapTileTimer = null;
     });
     tileLayer.on("tileerror", () => { tileErrors += 1; });
-    const line = routeCardGeometryPoints(state, rows);
+    const line = routeCardGeometryPoints(state, rows.map(item => item.row));
     if (line.length > 1) {
       window.L.polyline(line, { color: "white", weight: 10 }).addTo(map);
       window.L.polyline(line, { color: "#2563eb", weight: 6 }).addTo(map);
     }
-    rows.forEach((row, index) => {
+    rows.forEach(({ row, sequence }, index) => {
       let committed = [+row.stop.latitude, +row.stop.longitude];
       let saving = false;
       const endpointClass = index === 0 ? " route-map-marker-start" : index === rows.length - 1 ? " route-map-marker-end" : "";
       const icon = window.L.divIcon({
         className: `route-map-marker${endpointClass}`,
-        html: `<span>${index + 1}</span>`,
+        html: `<span>${sequence}</span>`,
         iconSize: [28, 28],
         iconAnchor: [14, 14],
       });
       const marker = window.L.marker(committed, { icon, draggable: true }).addTo(map);
-      marker.bindTooltip(`${index + 1}. ${esc(row.stop.name)}`);
+      marker.bindTooltip(`${sequence}. ${esc(row.stop.name)}`);
       marker.on("dragend", async () => {
         if (saving) { marker.setLatLng(committed); return; }
         saving = true;

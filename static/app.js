@@ -94,6 +94,7 @@ function route() {
   const cardTitle = view === "vehicleCard" ? "Карточка автобуса" : view === "routeCard" ? "Карточка маршрута" : view;
   $("page-title").textContent = TITLES[view] || cardTitle;
   const fn = VIEWS[view] || VIEWS.dashboard;
+  if (typeof routeCardDestroyMap === "function") routeCardDestroyMap();
   $("content").innerHTML = "<div class='muted'>Загрузка…</div>";
   fn(...args).catch(e => { $("content").innerHTML = `<div class="vio"><b>Ошибка</b>${esc(e.message)}</div>`; });
 }
