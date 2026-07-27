@@ -252,9 +252,11 @@ def _coordinate_pair(item):
 
 
 def _unique_named_stop(con, item, name):
-    candidates = db.rows(con.execute(
-        "SELECT * FROM stops WHERE lower(name)=lower(?) ORDER BY id", (name,)
-    ))
+    normalized_name = _normalized_identity_text(name)
+    candidates = [
+        row for row in db.rows(con.execute("SELECT * FROM stops ORDER BY id"))
+        if _normalized_identity_text(row.get("name")) == normalized_name
+    ]
     if len(candidates) == 1:
         return candidates[0]
     if not candidates:
@@ -334,6 +336,87 @@ def _stop_by_legacy_identity(con, item):
         "active": 1,
         "notes": None,
     }
+
+
+def _resolve_or_create_erm_stop(con, item):
+    stop = _stop_by_legacy_identity(con, item)
+    if stop["id"] is not None:
+        return stop["id"]
+
+    name = str(item.get("stop_name") or "").strip()
+    if not name:
+        raise ValueError("В ЭРМ указана остановка без наименования")
+    coordinates = _coordinate_pair(item)
+    latitude, longitude = coordinates if coordinates is not None else (None, None)
+    now = datetime.datetime.now().isoformat(timespec="seconds")
+    cursor = con.execute(
+        "INSERT INTO stops(external_code,name,latitude,longitude,address,source,"
+        "created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",
+        (
+            stop.get("external_code"),
+            name,
+            latitude,
+            longitude,
+            item.get("address", item.get("street")),
+            "erm_import",
+            now,
+            now,
+        ),
+    )
+    return cursor.lastrowid
+
+
+def normalize_erm_depot_sections(con, route_id, details):
+    """Persist all ERM depot page sections as one sequence per direction."""
+    sheets = details.get("sheets") if isinstance(details, dict) else None
+    if not isinstance(sheets, dict):
+        return {"depot_out": 0, "depot_in": 0}
+
+    direction_by_kind = {"из парка": "depot_out", "в парк": "depot_in"}
+    items_by_direction = {direction: [] for direction in DIRECTIONS}
+    present = set()
+    for sheet_name, sheet in sheets.items():
+        sections = sheet.get("sections") if isinstance(sheet, dict) else None
+        if not isinstance(sections, list):
+            continue
+        for section_index, section in enumerate(sections, start=1):
+            if not isinstance(section, dict):
+                continue
+            kind = str(section.get("kind") or sheet_name).strip().casefold()
+            direction = direction_by_kind.get(kind)
+            if direction is None:
+                continue
+            present.add(direction)
+            stops = section.get("stops")
+            if not isinstance(stops, list):
+                continue
+            for item in stops:
+                if not isinstance(item, dict):
+                    continue
+                rows = items_by_direction[direction]
+                runtime = _travel_seconds(item.get("travel_time"))
+                rows.append({
+                    "stop_id": _resolve_or_create_erm_stop(con, item),
+                    "sequence": len(rows) + 1,
+                    "distance_from_prev_km": _legacy_distance(item),
+                    "run_time_day_sec": runtime,
+                    "run_time_night_sec": runtime,
+                    "source_detail": json.dumps({
+                        "sheet": sheet_name,
+                        "section": section_index,
+                        "header_row": section.get("header_row"),
+                        "row": item.get("row"),
+                    }, ensure_ascii=False),
+                })
+
+    result = {"depot_out": 0, "depot_in": 0}
+    for direction in DIRECTIONS:
+        if direction not in present:
+            continue
+        rows = items_by_direction[direction]
+        replace_depot_rows(con, route_id, direction, rows, source="erm_import")
+        result[direction] = len(rows)
+    return result
 
 
 def _legacy_rows(con, route, direction):

@@ -2,8 +2,9 @@
 import io
 import json
 
+import pytest
 from fastapi.testclient import TestClient
-from openpyxl import Workbook
+from openpyxl import Workbook, load_workbook
 
 
 ROUTE_TITLE = 'Маршрут № 1 "Железнодорожный вокзал - Ореховая улица"'
@@ -23,7 +24,9 @@ def make_client(tmp_path):
         con.close()
 
     client = TestClient(app)
-    token = client.post("/api/login", json={"username": "admin", "password": "admin"}).json()["token"]
+    token = client.post(
+        "/api/login", json={"username": "admin", "password": "admin"}
+    ).json()["token"]
     client.headers.update({"Authorization": "Bearer " + token})
     return client
 
@@ -46,7 +49,10 @@ def _write_header(ws, row):
         ws.cell(row=row, column=col, value=value)
 
 
-def _write_stop(ws, row, seq, stop_id, line_name, direction, stop, street, distance_m, cumulative_m, travel, cumulative):
+def _write_stop(
+    ws, row, seq, stop_id, line_name, direction, stop, street,
+    distance_m, cumulative_m, travel, cumulative,
+):
     values = {
         2: seq,
         3: stop_id,
@@ -103,6 +109,45 @@ def build_erm_workbook():
     return data.getvalue()
 
 
+def build_erm_workbook_with_depot_continuation():
+    wb = load_workbook(io.BytesIO(build_erm_workbook()))
+    ws = wb["из парка"]
+    _write_header(ws, 8)
+    _write_stop(
+        ws, 9, 3, 302, "А001", "из парка", "Площадь", "Советская площадь",
+        250, 950, "00:02:30", "00:07:30",
+    )
+    data = io.BytesIO()
+    wb.save(data)
+    return data.getvalue()
+
+
+def build_erm_without_depot_in():
+    wb = load_workbook(io.BytesIO(build_erm_workbook()))
+    del wb["в парк"]
+    data = io.BytesIO()
+    wb.save(data)
+    return data.getvalue()
+
+
+def _depot_rows(route_id):
+    import app.db as db
+
+    con = db.connect()
+    try:
+        return db.rows(con.execute(
+            "SELECT r.stop_id,r.direction,r.sequence,r.distance_from_prev_km,"
+            "r.run_time_day_sec,r.run_time_night_sec,r.source,r.source_detail,"
+            "s.external_code,s.name,s.address,s.latitude,s.longitude,"
+            "s.source AS stop_source "
+            "FROM route_depot_stops r JOIN stops s ON s.id=r.stop_id "
+            "WHERE r.route_id=? ORDER BY r.direction,r.sequence",
+            (route_id,),
+        ))
+    finally:
+        con.close()
+
+
 def test_parse_erm_route_workbook_extracts_route_and_sections():
     from app.erm_import import parse_erm_route_workbook
 
@@ -146,6 +191,36 @@ def test_erm_route_import_creates_route_and_preserves_details(tmp_path):
     assert notes["source"] == "ЭРМ"
     assert notes["details"]["sheets"]["из парка"]["sections"][0]["stops"][1]["stop_name"] == "Железнодорожный вокзал"
 
+    rows = _depot_rows(data["route_id"])
+    assert [(row["direction"], row["external_code"]) for row in rows] == [
+        ("depot_in", "200"),
+        ("depot_in", "300"),
+        ("depot_out", "300"),
+        ("depot_out", "201"),
+    ]
+    assert [row["distance_from_prev_km"] for row in rows] == [0, 0.8, 0, 0.7]
+    assert [row["run_time_day_sec"] for row in rows] == [0, 360, 0, 300]
+    assert [row["run_time_night_sec"] for row in rows] == [0, 360, 0, 300]
+    assert {row["source"] for row in rows} == {"erm_import"}
+    assert json.loads(rows[2]["source_detail"])["sheet"] == "из парка"
+    assert json.loads(rows[2]["source_detail"])["section"] == 1
+    assert rows[2]["address"] == "Гаражная улица"
+    assert rows[2]["latitude"] == pytest.approx(56.801)
+    assert rows[2]["longitude"] == pytest.approx(35.901)
+    assert rows[2]["stop_source"] == "erm_import"
+
+    import app.db as db
+    con = db.connect()
+    try:
+        states = db.rows(con.execute(
+            "SELECT direction FROM route_depot_section_state "
+            "WHERE route_id=? ORDER BY direction",
+            (data["route_id"],),
+        ))
+    finally:
+        con.close()
+    assert [state["direction"] for state in states] == ["depot_in", "depot_out"]
+
 
 def test_erm_route_import_updates_existing_route_by_number(tmp_path):
     client = make_client(tmp_path)
@@ -180,3 +255,140 @@ def test_erm_route_import_updates_existing_route_by_number(tmp_path):
     assert network["forward"][-1]["cumulative_km"] == 1.5
     assert network["forward"][1]["run_time_sec"] == 180
     assert network["backward"][-1]["cumulative_km"] == 1.3
+
+    repeated = client.post(
+        "/api/import/routes/erm",
+        files={"file": ("erm.xlsx", build_erm_workbook(), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+    )
+    assert repeated.status_code == 200, repeated.text
+    rows = _depot_rows(data["route_id"])
+    assert len(rows) == 4
+    assert [(row["direction"], row["sequence"]) for row in rows] == [
+        ("depot_in", 1), ("depot_in", 2),
+        ("depot_out", 1), ("depot_out", 2),
+    ]
+
+
+def test_erm_route_import_combines_repeated_depot_sections(tmp_path):
+    client = make_client(tmp_path)
+
+    response = client.post(
+        "/api/import/routes/erm",
+        files={
+            "file": (
+                "erm.xlsx",
+                build_erm_workbook_with_depot_continuation(),
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    rows = [
+        row for row in _depot_rows(response.json()["route_id"])
+        if row["direction"] == "depot_out"
+    ]
+    assert [row["external_code"] for row in rows] == ["300", "201", "302"]
+    assert [row["sequence"] for row in rows] == [1, 2, 3]
+    assert rows[-1]["distance_from_prev_km"] == 0.25
+    assert rows[-1]["run_time_day_sec"] == 150
+    assert rows[-1]["run_time_night_sec"] == 150
+    assert json.loads(rows[-1]["source_detail"])["section"] == 2
+
+
+def test_erm_route_import_does_not_clear_absent_depot_direction(tmp_path):
+    client = make_client(tmp_path)
+    created = client.post(
+        "/api/import/routes/erm",
+        files={"file": ("erm.xlsx", build_erm_workbook(), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+    )
+    assert created.status_code == 200, created.text
+    route_id = created.json()["route_id"]
+    depot_in_before = [
+        (row["external_code"], row["sequence"])
+        for row in _depot_rows(route_id) if row["direction"] == "depot_in"
+    ]
+
+    updated = client.post(
+        "/api/import/routes/erm",
+        files={"file": ("erm.xlsx", build_erm_without_depot_in(), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+    )
+
+    assert updated.status_code == 200, updated.text
+    rows = _depot_rows(route_id)
+    assert [
+        (row["external_code"], row["sequence"])
+        for row in rows if row["direction"] == "depot_in"
+    ] == depot_in_before
+    assert any(row["direction"] == "depot_out" for row in rows)
+
+
+def test_erm_route_import_rolls_back_route_and_depot_changes(tmp_path, monkeypatch):
+    client = make_client(tmp_path)
+    created = client.post("/api/refs/routes", json={
+        "number": "1",
+        "name": "До импорта",
+        "version": 3,
+        "notes": "старое",
+    })
+    assert created.status_code == 200, created.text
+    route_id = created.json()["id"]
+
+    import app.api_refs as api_refs
+    original = api_refs.normalize_erm_depot_sections
+
+    def fail_after_depot_write(con, imported_route_id, details):
+        original(con, imported_route_id, details)
+        raise RuntimeError("test rollback")
+
+    monkeypatch.setattr(api_refs, "normalize_erm_depot_sections", fail_after_depot_write)
+    with pytest.raises(RuntimeError, match="test rollback"):
+        client.post(
+            "/api/import/routes/erm",
+            files={"file": ("erm.xlsx", build_erm_workbook(), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+        )
+
+    route = next(
+        row for row in client.get("/api/refs/routes").json()["items"]
+        if row["id"] == route_id
+    )
+    assert route["name"] == "До импорта"
+    assert route["version"] == 3
+    assert route["notes"] == "старое"
+    assert _depot_rows(route_id) == []
+
+
+def test_erm_route_import_does_not_choose_ambiguous_same_name_stop(tmp_path):
+    client = make_client(tmp_path)
+
+    import app.db as db
+    con = db.connect()
+    try:
+        con.execute(
+            "INSERT INTO stops(external_code,name,address,latitude,longitude) "
+            "VALUES(?,?,?,?,?)",
+            ("X", "Автопарк", "Другая улица", 1.0, 1.0),
+        )
+        first_id = con.execute("SELECT last_insert_rowid()").fetchone()[0]
+        con.execute(
+            "INSERT INTO stops(external_code,name,address,latitude,longitude) "
+            "VALUES(?,?,?,?,?)",
+            ("Y", "Автопарк", "Ещё одна улица", 2.0, 2.0),
+        )
+        second_id = con.execute("SELECT last_insert_rowid()").fetchone()[0]
+        con.commit()
+    finally:
+        con.close()
+
+    response = client.post(
+        "/api/import/routes/erm",
+        files={"file": ("erm.xlsx", build_erm_workbook(), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+    )
+
+    assert response.status_code == 200, response.text
+    first_depot_out = next(
+        row for row in _depot_rows(response.json()["route_id"])
+        if row["direction"] == "depot_out" and row["sequence"] == 1
+    )
+    assert first_depot_out["stop_id"] not in {first_id, second_id}
+    assert first_depot_out["external_code"] == "300"

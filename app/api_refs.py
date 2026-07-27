@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, Body, UploadFile, File
 from . import db
 from .auth import current_user, require_write, hash_password
 from .erm_import import ErmImportError, parse_erm_route_workbook
+from .route_depot import normalize_erm_depot_sections
 from .route_migration import migrate_route
 from .xl import xlsx_response
 
@@ -158,6 +159,7 @@ async def route_erm_import(file: UploadFile = File(...), user=Depends(current_us
             db.audit(con, user["username"], "импорт ЭРМ", "routes", route_id, new=payload,
                      comment=f"создан маршрут № {parsed['number']}")
         network_result = migrate_route(con, route_id)
+        normalize_erm_depot_sections(con, route_id, parsed["details"])
         con.commit()
         return {
             "route_id": route_id,
