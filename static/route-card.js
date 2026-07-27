@@ -209,9 +209,8 @@ function routeCardMap(state) {
   return `${routeDirectionSwitch(state)}<div class="route-card-toolbar"><div><b>Координатная схема</b><div class="muted">Схема без географической подложки. Маркер можно перетащить; новые координаты сохранятся после отпускания.</div></div>
     <button class="btn sec" onclick="routeCardOsrmPreview()">Рассчитать через OSRM</button></div>
     ${missing ? `<div class="vio w"><b>Не все остановки показаны</b>Без координат: ${missing}. Добавьте широту и долготу на вкладке остановок.</div>` : ""}
-    <div class="route-map-warning" hidden>Подложка OpenStreetMap недоступна</div>
-    <div class="route-map-canvas" hidden></div>
-    <div class="route-map-fallback">${routeCardFallbackMap(state, plotted)}</div>
+    <div class="vio w route-map-warning" role="status" aria-live="polite" hidden>Подложка OpenStreetMap недоступна</div>
+    <div class="route-map"><div class="route-map-canvas" hidden></div><div class="route-map-fallback">${routeCardFallbackMap(state, plotted)}</div></div>
     <div class="route-map-legend">${geo}<span>● остановка</span><span>— последовательность движения</span></div>${routeOsrmDiff(state)}`;
 }
 
