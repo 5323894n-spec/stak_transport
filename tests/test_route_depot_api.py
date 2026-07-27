@@ -166,6 +166,64 @@ def test_replace_rejects_duplicate_or_gapped_sequence(client, route_id, sequence
     assert "не иметь пропусков" in response.json()["detail"]
 
 
+@pytest.mark.parametrize(
+    "value", ["1e999", float("nan"), float("inf"), float("-inf")]
+)
+def test_normalize_items_rejects_non_finite_distance(value):
+    from app.route_depot import normalize_items
+
+    with pytest.raises(ValueError, match="конечным числом"):
+        normalize_items([{
+            "stop_id": 1,
+            "sequence": 1,
+            "distance_from_prev_km": value,
+            "run_time_day_sec": 0,
+            "run_time_night_sec": 0,
+        }])
+
+
+def test_normalize_items_rejects_non_finite_cumulative_distance():
+    from app.route_depot import normalize_items
+
+    with pytest.raises(ValueError, match="Накопленное расстояние"):
+        normalize_items([
+            {
+                "stop_id": 1,
+                "sequence": 1,
+                "distance_from_prev_km": "9e307",
+                "run_time_day_sec": 0,
+                "run_time_night_sec": 0,
+            },
+            {
+                "stop_id": 2,
+                "sequence": 2,
+                "distance_from_prev_km": "9e307",
+                "run_time_day_sec": 0,
+                "run_time_night_sec": 0,
+            },
+        ])
+
+
+@pytest.mark.parametrize("field", ["run_time_day_sec", "run_time_night_sec"])
+def test_replace_rejects_runtime_overflow_with_http_400(client, route_id, field):
+    stop_id = _create_stop(client, "Автопарк", "300")
+    item = {
+        "stop_id": stop_id,
+        "sequence": 1,
+        "distance_from_prev_km": 0,
+        "run_time_day_sec": 0,
+        "run_time_night_sec": 0,
+    }
+    item[field] = "1e999"
+
+    response = client.put(
+        f"/api/routes/{route_id}/depot-stops/depot_out", json={"items": [item]}
+    )
+
+    assert response.status_code == 400
+    assert "целым числом" in response.json()["detail"]
+
+
 def test_read_only_user_cannot_replace_depot_stops(client, route_id):
     import app.db as db
     from app.auth import hash_password
@@ -317,6 +375,57 @@ def test_get_uses_compatible_legacy_erm_fallback_when_table_is_empty(client, rou
     assert rows[-1]["cumulative_day_sec"] == 180
     assert rows[-1]["cumulative_night_sec"] == 180
     assert rows[-1]["source"] == "legacy_erm"
+
+
+def test_legacy_erm_fallback_combines_all_page_sections(client, route_id):
+    import app.db as db
+
+    first = _create_stop(client, "Автопарк", "300")
+    second = _create_stop(client, "Вокзал", "301")
+    third = _create_stop(client, "Площадь", "302")
+    sections = [
+        {
+            "sheet": "из парка",
+            "kind": "из парка",
+            "stops": [
+                {"seq": 1, "stop_id": 300, "stop_name": "Автопарк",
+                 "distance_km": 0, "travel_time": "00:00:00"},
+                {"seq": 2, "stop_id": 301, "stop_name": "Вокзал",
+                 "distance_km": 1.25, "travel_time": "00:03:00"},
+            ],
+        },
+        {
+            "sheet": "из парка",
+            "kind": "из парка",
+            "stops": [
+                {"seq": 1, "stop_id": 302, "stop_name": "Площадь",
+                 "distance_km": 0.75, "travel_time": "00:02:00"},
+            ],
+        },
+    ]
+    con = db.connect()
+    try:
+        con.execute(
+            "UPDATE routes SET notes=? WHERE id=?",
+            (json.dumps({"details": {"sheets": {
+                "из парка": {"sections": sections}
+            }}}, ensure_ascii=False), route_id),
+        )
+        con.commit()
+    finally:
+        con.close()
+
+    response = client.get(
+        f"/api/routes/{route_id}/depot-stops?direction=depot_out"
+    )
+
+    assert response.status_code == 200, response.text
+    rows = response.json()["items"]
+    assert [row["stop_id"] for row in rows] == [first, second, third]
+    assert [row["sequence"] for row in rows] == [1, 2, 3]
+    assert rows[-1]["cumulative_km"] == 2.0
+    assert rows[-1]["cumulative_day_sec"] == 300
+    assert json.loads(rows[-1]["source_detail"])["section"] == 2
 
 
 def test_normalized_depot_rows_take_priority_over_legacy_notes(client, route_id):
