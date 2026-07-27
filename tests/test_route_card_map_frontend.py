@@ -1,8 +1,15 @@
+import re
 from hashlib import sha256
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def function_body(source, name):
+    match = re.search(rf"function {name}\([^)]*\)\s*\{{(.*?)\n\}}", source, re.DOTALL)
+    assert match, f"missing function {name}"
+    return match.group(1)
 
 
 def test_leaflet_is_vendored_and_loaded_before_route_card():
@@ -57,6 +64,8 @@ def test_route_card_builds_and_cleans_up_leaflet_map():
     assert 'tileLayer.on("tileerror"' in source
     assert "routeMapInstance.remove()" in source
     assert "fitBounds" in source
+    assert 'canvas.style.width = "100%"' in source
+    assert 'canvas.style.height = "390px"' in source
 
 
 def test_route_card_leaflet_markers_are_draggable_and_persist_coordinates():
@@ -64,7 +73,24 @@ def test_route_card_leaflet_markers_are_draggable_and_persist_coordinates():
 
     assert "draggable: true" in source
     assert 'marker.on("dragend"' in source
-    assert "marker.setLatLng(original)" in source
+    assert "let committed =" in source
+    assert "let saving = false" in source
+    assert "if (saving)" in source
+    assert "marker.setLatLng(committed)" in source
+    assert "marker.dragging.disable()" in source
+    assert "committed = [latitude, longitude]" in source
+    assert "marker.dragging.enable()" in source
     assert 'method: "PUT"' in source
     assert "row.stop.latitude = latitude" in source
     assert "row.stop.longitude = longitude" in source
+
+
+def test_route_card_clears_stale_osrm_geometry_on_direction_change_and_cancel():
+    source = (ROOT / "static" / "route-card.js").read_text(encoding="utf-8")
+    direction = function_body(source, "routeCardDirection")
+    cancel = function_body(source, "routeCardCancelOsrm")
+
+    assert "state.osrmPreview = null" in direction
+    assert "state.geometry = null" in direction
+    assert "window._routeCard.osrmPreview = null" in cancel
+    assert "window._routeCard.geometry = null" in cancel

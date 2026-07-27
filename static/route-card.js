@@ -72,6 +72,7 @@ function routeCardDirection(direction) {
   const state = window._routeCard;
   state.direction = direction;
   state.osrmPreview = null;
+  state.geometry = null;
   renderRouteCard(state);
 }
 
@@ -291,6 +292,8 @@ function routeCardBindMap(state) {
   }
   try {
     canvas.hidden = false;
+    canvas.style.width = "100%";
+    canvas.style.height = "390px";
     if (fallback) fallback.hidden = true;
     const map = window.L.map(canvas);
     routeMapInstance = map;
@@ -312,20 +315,28 @@ function routeCardBindMap(state) {
       window.L.polyline(line, { color: "#2563eb", weight: 6 }).addTo(map);
     }
     rows.forEach((row, index) => {
-      const original = [+row.stop.latitude, +row.stop.longitude];
+      let committed = [+row.stop.latitude, +row.stop.longitude];
+      let saving = false;
       const endpointClass = index === 0 ? " route-map-marker-start" : index === rows.length - 1 ? " route-map-marker-end" : "";
       const icon = window.L.divIcon({ className: `route-map-marker${endpointClass}`, html: `<span>${index + 1}</span>` });
-      const marker = window.L.marker(original, { icon, draggable: true }).addTo(map);
+      const marker = window.L.marker(committed, { icon, draggable: true }).addTo(map);
       marker.bindTooltip(`${index + 1}. ${esc(row.stop.name)}`);
       marker.on("dragend", async () => {
+        if (saving) { marker.setLatLng(committed); return; }
+        saving = true;
+        marker.dragging.disable();
         const point = marker.getLatLng(), latitude = point.lat, longitude = point.lng;
         try {
           await api(`/api/stops/${row.stop_id}`, { method: "PUT", body: { latitude, longitude } });
           row.stop.latitude = latitude; row.stop.longitude = longitude;
+          committed = [latitude, longitude];
           toast("Координаты остановки сохранены");
         } catch (error) {
-          marker.setLatLng(original);
+          marker.setLatLng(committed);
           toast(error.message, true);
+        } finally {
+          saving = false;
+          marker.dragging.enable();
         }
       });
     });
@@ -361,7 +372,11 @@ async function routeCardOsrmPreview() {
   state.geometry = state.osrmPreview.geometry; renderRouteCard(state);
 }
 
-function routeCardCancelOsrm() { window._routeCard.osrmPreview = null; renderRouteCard(window._routeCard); }
+function routeCardCancelOsrm() {
+  window._routeCard.osrmPreview = null;
+  window._routeCard.geometry = null;
+  renderRouteCard(window._routeCard);
+}
 
 async function routeCardOsrmApply() {
   const state = window._routeCard;
