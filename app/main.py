@@ -8,6 +8,7 @@ from . import db
 from .auth import login as do_login, ensure_admin, current_user
 from .api_refs import router as refs_router
 from .api_route_network import router as route_network_router
+from .api_route_documents import router as route_documents_router
 from .api_route_periods import router as route_periods_router
 from .api_route_timetable import router as route_timetable_router
 from .api_route_shifts import router as route_shifts_router
@@ -73,6 +74,7 @@ def me(user=Depends(current_user)):
 
 app.include_router(refs_router)
 app.include_router(route_network_router)
+app.include_router(route_documents_router)
 app.include_router(route_periods_router)
 app.include_router(route_timetable_router)
 app.include_router(route_shifts_router)

@@ -137,7 +137,13 @@ def stop_delete(stop_id: int, user=Depends(current_user)):
     con = db.connect()
     try:
         stop = _stop_or_404(con, stop_id)
-        if con.execute("SELECT 1 FROM route_stops WHERE stop_id=? LIMIT 1", (stop_id,)).fetchone():
+        used_on_route = con.execute(
+            "SELECT 1 FROM route_stops WHERE stop_id=? LIMIT 1", (stop_id,)
+        ).fetchone()
+        used_on_depot_route = con.execute(
+            "SELECT 1 FROM route_depot_stops WHERE stop_id=? LIMIT 1", (stop_id,)
+        ).fetchone()
+        if used_on_route or used_on_depot_route:
             raise HTTPException(409, "Остановка используется в трассе маршрута")
         con.execute("DELETE FROM stops WHERE id=?", (stop_id,))
         db.audit(con, user["username"], "удаление остановки", "stops", stop_id, old=stop)
