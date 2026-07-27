@@ -4,7 +4,7 @@
 import datetime
 import json
 import math
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 
 from . import db
 
@@ -99,6 +99,9 @@ def normalize_items(items):
     for source_item in items:
         if not isinstance(source_item, dict):
             raise ValueError("Каждая остановка должна быть объектом")
+        source_detail = source_item.get("source_detail")
+        if source_detail is not None and not isinstance(source_detail, str):
+            raise ValueError("Поле source_detail должно быть строкой или null")
         item = {
             "stop_id": _positive_integer(source_item.get("stop_id"), "ID остановки"),
             "sequence": _positive_integer(source_item.get("sequence"), "Порядковый номер"),
@@ -111,7 +114,7 @@ def normalize_items(items):
             "run_time_night_sec": _nonnegative_integer(
                 source_item.get("run_time_night_sec", 0), "Ночное время"
             ),
-            "source_detail": source_item.get("source_detail"),
+            "source_detail": source_detail,
         }
         normalized.append(item)
 
@@ -207,21 +210,79 @@ def _travel_seconds(value):
     if value in (None, ""):
         return 0
     text = str(value).strip()
+    if not text:
+        return 0
     parts = text.split(":")
     if len(parts) == 3:
         try:
-            hours, minutes = int(parts[0]), int(parts[1])
-            seconds = int(float(parts[2]))
-            if min(hours, minutes, seconds) < 0:
+            hours = _nonnegative_integer(parts[0], "Часы")
+            minutes = _nonnegative_integer(parts[1], "Минуты")
+            seconds = _nonnegative_integer(parts[2], "Секунды")
+            if minutes > 59 or seconds > 59:
                 return 0
-            return hours * 3600 + minutes * 60 + seconds
-        except (TypeError, ValueError):
+            total = hours * 3600 + minutes * 60 + seconds
+            return total if total <= _SQLITE_INTEGER_MAX else 0
+        except (TypeError, ValueError, OverflowError):
             return 0
     try:
-        number = float(text.replace(",", "."))
-    except ValueError:
+        number = _decimal(text, "Время")
+        if number < 0:
+            return 0
+        seconds = (number * Decimal(60)).to_integral_value(rounding=ROUND_HALF_UP)
+        if seconds > _SQLITE_INTEGER_MAX:
+            return 0
+        return int(seconds)
+    except (TypeError, ValueError, OverflowError):
         return 0
-    return max(0, int(round(number * 60))) if math.isfinite(number) else 0
+
+
+def _normalized_identity_text(value):
+    return " ".join(str(value or "").strip().casefold().split())
+
+
+def _coordinate_pair(item):
+    try:
+        latitude = float(item.get("latitude", item.get("lat")))
+        longitude = float(item.get("longitude", item.get("lon")))
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(latitude) or not math.isfinite(longitude):
+        return None
+    return latitude, longitude
+
+
+def _unique_named_stop(con, item, name):
+    candidates = db.rows(con.execute(
+        "SELECT * FROM stops WHERE lower(name)=lower(?) ORDER BY id", (name,)
+    ))
+    if len(candidates) == 1:
+        return candidates[0]
+    if not candidates:
+        return None
+
+    street = _normalized_identity_text(item.get("address", item.get("street")))
+    if street:
+        address_matches = [
+            row for row in candidates
+            if _normalized_identity_text(row.get("address")) == street
+        ]
+        if len(address_matches) == 1:
+            return address_matches[0]
+        if address_matches:
+            candidates = address_matches
+
+    coordinates = _coordinate_pair(item)
+    if coordinates:
+        latitude, longitude = coordinates
+        coordinate_matches = [
+            row for row in candidates
+            if row.get("latitude") is not None and row.get("longitude") is not None
+            and abs(float(row["latitude"]) - latitude) <= 0.000001
+            and abs(float(row["longitude"]) - longitude) <= 0.000001
+        ]
+        if len(coordinate_matches) == 1:
+            return coordinate_matches[0]
+    return None
 
 
 def _stop_by_legacy_identity(con, item):
@@ -234,9 +295,7 @@ def _stop_by_legacy_identity(con, item):
         ))
     name = str(item.get("stop_name") or "").strip()
     if row is None and name:
-        row = db.one(con.execute(
-            "SELECT * FROM stops WHERE lower(name)=lower(?) ORDER BY id LIMIT 1", (name,)
-        ))
+        row = _unique_named_stop(con, item, name)
     if row:
         return {
             "id": row["id"],
@@ -328,6 +387,13 @@ def get_depot_rows(con, route_id, direction, legacy_fallback=True):
     rows = _stored_rows(con, route_id, direction)
     if rows or not legacy_fallback:
         return rows
+    initialized = con.execute(
+        "SELECT 1 FROM route_depot_section_state "
+        "WHERE route_id=? AND direction=?",
+        (route_id, direction),
+    ).fetchone()
+    if initialized:
+        return []
     return _legacy_rows(con, route, direction)
 
 
@@ -359,4 +425,9 @@ def replace_depot_rows(con, route_id, direction, items, source="manual"):
                 item.get("source_detail"), timestamp, timestamp,
             ),
         )
+    con.execute(
+        "INSERT INTO route_depot_section_state(route_id,direction,updated_at) "
+        "VALUES(?,?,?) ON CONFLICT(route_id,direction) DO UPDATE SET updated_at=excluded.updated_at",
+        (route_id, direction, timestamp),
+    )
     return get_depot_rows(con, route_id, direction, legacy_fallback=False)

@@ -145,9 +145,15 @@ def stop_delete(stop_id: int, user=Depends(current_user)):
         ).fetchone()
         if used_on_route or used_on_depot_route:
             raise HTTPException(409, "Остановка используется в трассе маршрута")
-        con.execute("DELETE FROM stops WHERE id=?", (stop_id,))
-        db.audit(con, user["username"], "удаление остановки", "stops", stop_id, old=stop)
-        con.commit()
+        try:
+            con.execute("DELETE FROM stops WHERE id=?", (stop_id,))
+            db.audit(
+                con, user["username"], "удаление остановки", "stops", stop_id, old=stop
+            )
+            con.commit()
+        except sqlite3.IntegrityError as exc:
+            con.rollback()
+            raise HTTPException(409, "Остановка используется в трассе маршрута") from exc
         return {"ok": True}
     finally:
         con.close()

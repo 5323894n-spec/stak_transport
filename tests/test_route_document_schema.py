@@ -280,3 +280,49 @@ def test_route_depot_stops_enforces_direction_uniqueness_and_nonnegative_values(
         ).fetchone()[0] == 0
     finally:
         con.close()
+
+
+def test_route_depot_section_state_is_idempotent_and_enforces_contract(tmp_path):
+    db, con = _open_route_db(tmp_path)
+    try:
+        db.migrate_route_network(con)
+        db.migrate_route_network(con)
+        columns = {
+            row["name"]: row
+            for row in con.execute("PRAGMA table_info(route_depot_section_state)")
+        }
+        assert set(columns) == {"route_id", "direction", "updated_at"}
+        assert columns["route_id"]["pk"] == 1
+        assert columns["direction"]["pk"] == 2
+        assert columns["updated_at"]["notnull"] == 1
+        assert columns["updated_at"]["dflt_value"] == "CURRENT_TIMESTAMP"
+        foreign_keys = {
+            row["from"]: (row["table"], row["to"], row["on_delete"])
+            for row in con.execute(
+                "PRAGMA foreign_key_list(route_depot_section_state)"
+            )
+        }
+        assert foreign_keys["route_id"] == ("routes", "id", "CASCADE")
+
+        route_id, _, _ = _insert_route_and_stops(con)
+        con.execute(
+            "INSERT INTO route_depot_section_state(route_id,direction) VALUES(?,?)",
+            (route_id, "depot_out"),
+        )
+        with pytest.raises(sqlite3.IntegrityError):
+            con.execute(
+                "INSERT INTO route_depot_section_state(route_id,direction) VALUES(?,?)",
+                (route_id, "depot_out"),
+            )
+        with pytest.raises(sqlite3.IntegrityError):
+            con.execute(
+                "INSERT INTO route_depot_section_state(route_id,direction) VALUES(?,?)",
+                (route_id, "forward"),
+            )
+        con.execute("DELETE FROM routes WHERE id=?", (route_id,))
+        assert con.execute(
+            "SELECT COUNT(*) FROM route_depot_section_state WHERE route_id=?",
+            (route_id,),
+        ).fetchone()[0] == 0
+    finally:
+        con.close()

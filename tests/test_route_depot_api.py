@@ -67,6 +67,42 @@ def _items(first_stop, second_stop):
     ]
 
 
+def _set_legacy_stops(route_id, stops):
+    import app.db as db
+
+    notes = {
+        "source": "ЭРМ",
+        "details": {
+            "sheets": {
+                "из парка": {
+                    "sections": [{
+                        "sheet": "из парка",
+                        "kind": "из парка",
+                        "direction": "из парка",
+                        "stops": stops,
+                    }],
+                }
+            }
+        },
+    }
+    con = db.connect()
+    try:
+        con.execute(
+            "UPDATE routes SET notes=? WHERE id=?",
+            (json.dumps(notes, ensure_ascii=False), route_id),
+        )
+        con.commit()
+    finally:
+        con.close()
+
+
+def _legacy_stop(code, name, **overrides):
+    return {
+        "seq": 1, "stop_id": code, "stop_name": name,
+        "distance_km": 0, "travel_time": "00:00:00", **overrides,
+    }
+
+
 def test_replace_and_get_depot_stops_with_cumulative_values(client, route_id):
     first = _create_stop(client, "Автопарк", "300", 56.801, 35.901)
     second = _create_stop(client, "Вокзал", "301", 56.802, 35.902)
@@ -522,3 +558,158 @@ def test_normalized_depot_rows_take_priority_over_legacy_notes(client, route_id)
     ).json()["items"]
 
     assert [row["stop"]["name"] for row in rows] == ["Ручная остановка"]
+
+
+def test_empty_replace_initializes_direction_and_suppresses_legacy_fallback(
+    client, route_id
+):
+    _create_stop(client, "Автопарк", "300")
+    _set_legacy_stops(route_id, [_legacy_stop(300, "Автопарк")])
+    assert len(client.get(
+        f"/api/routes/{route_id}/depot-stops?direction=depot_out"
+    ).json()["items"]) == 1
+
+    saved = client.put(
+        f"/api/routes/{route_id}/depot-stops/depot_out", json={"items": []}
+    )
+    loaded = client.get(
+        f"/api/routes/{route_id}/depot-stops?direction=depot_out"
+    )
+
+    assert saved.status_code == 200, saved.text
+    assert saved.json()["items"] == []
+    assert loaded.status_code == 200, loaded.text
+    assert loaded.json()["items"] == []
+
+
+@pytest.mark.parametrize("source_detail", [{"page": 1}, [1], True, 7, 1.5])
+def test_invalid_source_detail_returns_400_without_deleting_old_rows(
+    client, route_id, source_detail
+):
+    first = _create_stop(client, "Автопарк", "300")
+    second = _create_stop(client, "Вокзал", "301")
+    initial = client.put(
+        f"/api/routes/{route_id}/depot-stops/depot_out",
+        json={"items": _items(first, second)},
+    )
+    assert initial.status_code == 200, initial.text
+
+    response = client.put(
+        f"/api/routes/{route_id}/depot-stops/depot_out",
+        json={"items": [{
+            "stop_id": first,
+            "sequence": 1,
+            "distance_from_prev_km": 0,
+            "run_time_day_sec": 0,
+            "run_time_night_sec": 0,
+            "source_detail": source_detail,
+        }]},
+    )
+
+    assert response.status_code == 400
+    assert "source_detail" in response.json()["detail"]
+    rows = client.get(
+        f"/api/routes/{route_id}/depot-stops?direction=depot_out"
+    ).json()["items"]
+    assert [row["stop_id"] for row in rows] == [first, second]
+
+
+@pytest.mark.parametrize(
+    ("travel_time", "expected"),
+    [
+        ("00:00:1e999", 0),
+        ("NaN", 0),
+        ("Infinity", 0),
+        ("00:60:00", 0),
+        ("00:00:60", 0),
+        ("999999999999999999999:00:00", 0),
+        ("25:30:15", 91815),
+    ],
+)
+def test_legacy_travel_time_is_tolerant_and_replace_remains_available(
+    client, route_id, travel_time, expected
+):
+    _create_stop(client, "Автопарк", "300")
+    _set_legacy_stops(route_id, [
+        _legacy_stop(300, "Автопарк", travel_time=travel_time)
+    ])
+
+    response = client.get(
+        f"/api/routes/{route_id}/depot-stops?direction=depot_out"
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["items"][0]["run_time_day_sec"] == expected
+    assert response.json()["items"][0]["run_time_night_sec"] == expected
+    replaced = client.put(
+        f"/api/routes/{route_id}/depot-stops/depot_out", json={"items": []}
+    )
+    assert replaced.status_code == 200, replaced.text
+
+
+def test_stop_delete_integrity_error_returns_conflict(client):
+    import app.db as db
+
+    stop_id = _create_stop(client, "Автопарк", "300")
+    con = db.connect()
+    try:
+        con.execute(f"""
+            CREATE TRIGGER test_stop_delete_race
+            BEFORE DELETE ON stops
+            WHEN OLD.id={stop_id}
+            BEGIN
+              SELECT RAISE(ABORT, 'foreign key constraint failed');
+            END
+        """)
+        con.commit()
+    finally:
+        con.close()
+
+    response = client.delete(f"/api/stops/{stop_id}")
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "Остановка используется в трассе маршрута"
+    assert any(
+        row["id"] == stop_id for row in client.get("/api/stops").json()["items"]
+    )
+
+
+def _create_named_stop(client, code, address, latitude, longitude):
+    response = client.post("/api/stops", json={
+        "name": "Центральная",
+        "external_code": code,
+        "address": address,
+        "latitude": latitude,
+        "longitude": longitude,
+    })
+    assert response.status_code == 200, response.text
+    return response.json()["id"]
+
+
+def test_legacy_stop_resolver_uses_name_and_normalized_street(client, route_id):
+    _create_named_stop(client, "A", "Улица Первая", 56.1, 35.1)
+    expected_id = _create_named_stop(client, "B", "  улица   ВТОРАЯ ", 56.2, 35.2)
+    _set_legacy_stops(route_id, [
+        _legacy_stop(None, "Центральная", street="Улица Вторая")
+    ])
+
+    row = client.get(
+        f"/api/routes/{route_id}/depot-stops?direction=depot_out"
+    ).json()["items"][0]
+
+    assert row["stop_id"] == expected_id
+    assert row["stop"]["address"] == "  улица   ВТОРАЯ "
+
+
+def test_legacy_stop_resolver_leaves_ambiguous_name_unresolved(client, route_id):
+    _create_named_stop(client, "A", "Улица Первая", 56.1, 35.1)
+    _create_named_stop(client, "B", "Улица Вторая", 56.2, 35.2)
+    _set_legacy_stops(route_id, [_legacy_stop(None, "Центральная")])
+
+    row = client.get(
+        f"/api/routes/{route_id}/depot-stops?direction=depot_out"
+    ).json()["items"][0]
+
+    assert row["stop_id"] is None
+    assert row["stop"]["id"] is None
+    assert row["stop"]["name"] == "Центральная"

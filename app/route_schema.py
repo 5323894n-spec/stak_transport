@@ -67,6 +67,13 @@ CREATE TABLE IF NOT EXISTS route_depot_stops(
 CREATE INDEX IF NOT EXISTS idx_route_depot_stops_stop
   ON route_depot_stops(stop_id);
 
+CREATE TABLE IF NOT EXISTS route_depot_section_state(
+  route_id INTEGER NOT NULL REFERENCES routes(id) ON DELETE CASCADE,
+  direction TEXT NOT NULL CHECK(direction IN ('depot_out','depot_in')),
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY(route_id,direction)
+);
+
 CREATE TABLE IF NOT EXISTS route_migration_log(
   id INTEGER PRIMARY KEY,
   route_id INTEGER NOT NULL REFERENCES routes(id) ON DELETE CASCADE,
