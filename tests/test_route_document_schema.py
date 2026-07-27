@@ -62,6 +62,27 @@ def test_route_stop_day_and_night_runtimes_are_backfilled_repeat_safely(tmp_path
             (route_stop_id,),
         ).fetchone()
         assert tuple(runtime) == (125, 125)
+
+        with pytest.raises(sqlite3.IntegrityError):
+            con.execute(
+                """
+                INSERT INTO route_stops(
+                  route_id, direction, stop_id, sequence,
+                  run_time_day_sec, run_time_night_sec
+                ) VALUES(?,?,?,?,?,?)
+                """,
+                (route_id, "forward", stop_id, 2, -1, 0),
+            )
+        with pytest.raises(sqlite3.IntegrityError):
+            con.execute(
+                """
+                INSERT INTO route_stops(
+                  route_id, direction, stop_id, sequence,
+                  run_time_day_sec, run_time_night_sec
+                ) VALUES(?,?,?,?,?,?)
+                """,
+                (route_id, "forward", stop_id, 3, 0, -1),
+            )
     finally:
         con.close()
 
@@ -98,6 +119,34 @@ def test_route_depot_stops_has_required_columns_unique_key_and_stop_index(tmp_pa
         assert columns["run_time_night_sec"]["dflt_value"] == "0"
         assert columns["source"]["notnull"] == 1
         assert columns["source"]["dflt_value"] == "'manual'"
+        for required_column in (
+            "route_id",
+            "direction",
+            "stop_id",
+            "sequence",
+            "created_at",
+            "updated_at",
+        ):
+            assert columns[required_column]["notnull"] == 1
+        assert columns["id"]["pk"] == 1
+        assert columns["created_at"]["dflt_value"] == "CURRENT_TIMESTAMP"
+        assert columns["updated_at"]["dflt_value"] == "CURRENT_TIMESTAMP"
+
+        table_sql = con.execute(
+            """
+            SELECT sql
+            FROM sqlite_master
+            WHERE type='table' AND name='route_depot_stops'
+            """
+        ).fetchone()["sql"]
+        assert "ID INTEGER PRIMARY KEY AUTOINCREMENT" in table_sql.upper()
+
+        foreign_keys = {
+            row["from"]: (row["table"], row["to"], row["on_delete"])
+            for row in con.execute("PRAGMA foreign_key_list(route_depot_stops)")
+        }
+        assert foreign_keys["route_id"] == ("routes", "id", "CASCADE")
+        assert foreign_keys["stop_id"][:2] == ("stops", "id")
 
         indexes = {
             row["name"]: row
@@ -131,7 +180,7 @@ def test_route_depot_stops_enforces_direction_uniqueness_and_nonnegative_values(
     _, con = _open_route_db(tmp_path)
     try:
         route_id, first_stop_id, second_stop_id = _insert_route_and_stops(con)
-        con.execute(
+        first_depot_stop_id = con.execute(
             """
             INSERT INTO route_depot_stops(
               route_id, direction, stop_id, sequence,
@@ -139,7 +188,18 @@ def test_route_depot_stops_enforces_direction_uniqueness_and_nonnegative_values(
             ) VALUES(?,?,?,?,?,?,?)
             """,
             (route_id, "depot_out", first_stop_id, 1, 1.5, 120, 140),
-        )
+        ).lastrowid
+
+        timestamps = con.execute(
+            """
+            SELECT created_at, updated_at
+            FROM route_depot_stops
+            WHERE id=?
+            """,
+            (first_depot_stop_id,),
+        ).fetchone()
+        assert timestamps["created_at"]
+        assert timestamps["updated_at"]
 
         with pytest.raises(sqlite3.IntegrityError):
             con.execute(
@@ -174,10 +234,49 @@ def test_route_depot_stops_enforces_direction_uniqueness_and_nonnegative_values(
                 """
                 INSERT INTO route_depot_stops(
                   route_id, direction, stop_id, sequence,
-                  run_time_day_sec, run_time_night_sec
-                ) VALUES(?,?,?,?,?,?)
+                  run_time_day_sec
+                ) VALUES(?,?,?,?,?)
                 """,
-                (route_id, "depot_in", second_stop_id, 1, -1, -1),
+                (route_id, "depot_in", second_stop_id, 1, -1),
             )
+        with pytest.raises(sqlite3.IntegrityError):
+            con.execute(
+                """
+                INSERT INTO route_depot_stops(
+                  route_id, direction, stop_id, sequence,
+                  run_time_night_sec
+                ) VALUES(?,?,?,?,?)
+                """,
+                (route_id, "depot_in", second_stop_id, 1, -1),
+            )
+        with pytest.raises(sqlite3.IntegrityError):
+            con.execute(
+                """
+                INSERT INTO route_depot_stops(
+                  route_id, direction, stop_id, sequence
+                ) VALUES(?,?,?,?)
+                """,
+                (route_id, "depot_in", -1, 1),
+            )
+
+        con.execute(
+            "DELETE FROM route_depot_stops WHERE id=?",
+            (first_depot_stop_id,),
+        )
+        next_depot_stop_id = con.execute(
+            """
+            INSERT INTO route_depot_stops(
+              route_id, direction, stop_id, sequence
+            ) VALUES(?,?,?,?)
+            """,
+            (route_id, "depot_out", second_stop_id, 1),
+        ).lastrowid
+        assert next_depot_stop_id > first_depot_stop_id
+
+        con.execute("DELETE FROM routes WHERE id=?", (route_id,))
+        assert con.execute(
+            "SELECT COUNT(*) FROM route_depot_stops WHERE route_id=?",
+            (route_id,),
+        ).fetchone()[0] == 0
     finally:
         con.close()
