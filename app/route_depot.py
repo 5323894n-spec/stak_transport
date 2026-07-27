@@ -240,10 +240,17 @@ def _normalized_identity_text(value):
     return " ".join(str(value or "").strip().casefold().split())
 
 
+def _item_value(item, primary, fallback):
+    value = item.get(primary)
+    if value is None or (isinstance(value, str) and not value.strip()):
+        value = item.get(fallback)
+    return value
+
+
 def _coordinate_pair(item):
     try:
-        latitude = float(item.get("latitude", item.get("lat")))
-        longitude = float(item.get("longitude", item.get("lon")))
+        latitude = float(_item_value(item, "latitude", "lat"))
+        longitude = float(_item_value(item, "longitude", "lon"))
     except (TypeError, ValueError):
         return None
     if not math.isfinite(latitude) or not math.isfinite(longitude):
@@ -251,30 +258,51 @@ def _coordinate_pair(item):
     return latitude, longitude
 
 
-def _unique_named_stop(con, item, name):
-    normalized_name = _normalized_identity_text(name)
-    candidates = [
-        row for row in db.rows(con.execute("SELECT * FROM stops ORDER BY id"))
-        if _normalized_identity_text(row.get("name")) == normalized_name
-    ]
-    if len(candidates) == 1:
-        return candidates[0]
+def _add_stop_to_index(index, row):
+    external_code = str(row.get("external_code") or "").strip()
+    if external_code:
+        index["external"].setdefault(external_code, []).append(row)
+    normalized_name = _normalized_identity_text(row.get("name"))
+    if normalized_name:
+        index["names"].setdefault(normalized_name, []).append(row)
+
+
+def _build_stop_index(con):
+    index = {"external": {}, "names": {}}
+    for row in db.rows(con.execute("SELECT * FROM stops ORDER BY id")):
+        _add_stop_to_index(index, row)
+    return index
+
+
+def _item_address(item):
+    return _normalized_identity_text(_item_value(item, "address", "street"))
+
+
+def _match_indexed_stop(item, index):
+    external_code = str(
+        item.get("stop_id") or item.get("external_code") or ""
+    ).strip()
+    if external_code:
+        external_matches = index["external"].get(external_code, [])
+        if external_matches:
+            return external_matches[0]
+
+    name = str(item.get("stop_name") or item.get("name") or "").strip()
+    candidates = list(index["names"].get(_normalized_identity_text(name), []))
     if not candidates:
         return None
 
-    street = _normalized_identity_text(item.get("address", item.get("street")))
-    if street:
-        address_matches = [
+    address = _item_address(item)
+    if address:
+        candidates = [
             row for row in candidates
-            if _normalized_identity_text(row.get("address")) == street
+            if _normalized_identity_text(row.get("address")) == address
         ]
-        if len(address_matches) == 1:
-            return address_matches[0]
-        if address_matches:
-            candidates = address_matches
+        if not candidates:
+            return None
 
     coordinates = _coordinate_pair(item)
-    if coordinates:
+    if coordinates is not None:
         latitude, longitude = coordinates
         coordinate_matches = []
         for row in candidates:
@@ -287,22 +315,19 @@ def _unique_named_stop(con, item, name):
                 and abs(candidate_longitude - longitude) <= 0.000001
             ):
                 coordinate_matches.append(row)
-        if len(coordinate_matches) == 1:
-            return coordinate_matches[0]
-    return None
+        candidates = coordinate_matches
+        if not candidates:
+            return None
+    return candidates[0] if len(candidates) == 1 else None
 
 
-def _stop_by_legacy_identity(con, item):
-    external_code = str(item.get("stop_id") or "").strip()
-    row = None
-    if external_code:
-        row = db.one(con.execute(
-            "SELECT * FROM stops WHERE external_code=? ORDER BY id LIMIT 1",
-            (external_code,),
-        ))
-    name = str(item.get("stop_name") or "").strip()
-    if row is None and name:
-        row = _unique_named_stop(con, item, name)
+def _stop_by_legacy_identity(con, item, index=None):
+    index = index or _build_stop_index(con)
+    row = _match_indexed_stop(item, index)
+    external_code = str(
+        item.get("stop_id") or item.get("external_code") or ""
+    ).strip()
+    name = str(item.get("stop_name") or item.get("name") or "").strip()
     if row:
         return {
             "id": row["id"],
@@ -324,9 +349,9 @@ def _stop_by_legacy_identity(con, item):
         "id": None,
         "external_code": external_code or None,
         "name": name,
-        "latitude": item.get("latitude", item.get("lat")),
-        "longitude": item.get("longitude", item.get("lon")),
-        "address": item.get("street"),
+        "latitude": _item_value(item, "latitude", "lat"),
+        "longitude": _item_value(item, "longitude", "lon"),
+        "address": _item_value(item, "address", "street"),
         "stop_kind": "обычная",
         "is_terminal": 0,
         "has_dispatcher": 0,
@@ -338,8 +363,8 @@ def _stop_by_legacy_identity(con, item):
     }
 
 
-def _resolve_or_create_erm_stop(con, item):
-    stop = _stop_by_legacy_identity(con, item)
+def _resolve_or_create_erm_stop(con, item, index):
+    stop = _stop_by_legacy_identity(con, item, index)
     if stop["id"] is not None:
         return stop["id"]
 
@@ -348,6 +373,7 @@ def _resolve_or_create_erm_stop(con, item):
         raise ValueError("В ЭРМ указана остановка без наименования")
     coordinates = _coordinate_pair(item)
     latitude, longitude = coordinates if coordinates is not None else (None, None)
+    address = _item_value(item, "address", "street")
     now = datetime.datetime.now().isoformat(timespec="seconds")
     cursor = con.execute(
         "INSERT INTO stops(external_code,name,latitude,longitude,address,source,"
@@ -357,12 +383,30 @@ def _resolve_or_create_erm_stop(con, item):
             name,
             latitude,
             longitude,
-            item.get("address", item.get("street")),
+            address,
             "erm_import",
             now,
             now,
         ),
     )
+    _add_stop_to_index(index, {
+        "id": cursor.lastrowid,
+        "external_code": stop.get("external_code"),
+        "name": name,
+        "latitude": latitude,
+        "longitude": longitude,
+        "address": address,
+        "stop_kind": "обычная",
+        "is_terminal": 0,
+        "has_dispatcher": 0,
+        "municipality": None,
+        "registry_flags": "{}",
+        "source": "erm_import",
+        "active": 1,
+        "notes": None,
+        "created_at": now,
+        "updated_at": now,
+    })
     return cursor.lastrowid
 
 
@@ -374,6 +418,7 @@ def normalize_erm_depot_sections(con, route_id, details):
 
     direction_by_kind = {"из парка": "depot_out", "в парк": "depot_in"}
     items_by_direction = {direction: [] for direction in DIRECTIONS}
+    stop_index = _build_stop_index(con)
     present = set()
     for sheet_name, sheet in sheets.items():
         sections = sheet.get("sections") if isinstance(sheet, dict) else None
@@ -386,7 +431,6 @@ def normalize_erm_depot_sections(con, route_id, details):
             direction = direction_by_kind.get(kind)
             if direction is None:
                 continue
-            present.add(direction)
             stops = section.get("stops")
             if not isinstance(stops, list):
                 continue
@@ -396,7 +440,7 @@ def normalize_erm_depot_sections(con, route_id, details):
                 rows = items_by_direction[direction]
                 runtime = _travel_seconds(item.get("travel_time"))
                 rows.append({
-                    "stop_id": _resolve_or_create_erm_stop(con, item),
+                    "stop_id": _resolve_or_create_erm_stop(con, item, stop_index),
                     "sequence": len(rows) + 1,
                     "distance_from_prev_km": _legacy_distance(item),
                     "run_time_day_sec": runtime,
@@ -408,6 +452,7 @@ def normalize_erm_depot_sections(con, route_id, details):
                         "row": item.get("row"),
                     }, ensure_ascii=False),
                 })
+                present.add(direction)
 
     result = {"depot_out": 0, "depot_in": 0}
     for direction in DIRECTIONS:
@@ -436,6 +481,7 @@ def _legacy_rows(con, route, direction):
     sections = sheet.get("sections") if isinstance(sheet, dict) else None
     if not isinstance(sections, list):
         return []
+    stop_index = _build_stop_index(con)
     rows = []
     for section_index, section in enumerate(sections, start=1):
         stops = section.get("stops") if isinstance(section, dict) else None
@@ -444,7 +490,7 @@ def _legacy_rows(con, route, direction):
         for item in stops:
             if not isinstance(item, dict):
                 continue
-            stop = _stop_by_legacy_identity(con, item)
+            stop = _stop_by_legacy_identity(con, item, stop_index)
             distance = _legacy_distance(item)
             runtime = _travel_seconds(item.get("travel_time"))
             rows.append({

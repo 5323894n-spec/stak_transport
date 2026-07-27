@@ -194,7 +194,7 @@ def test_erm_route_import_creates_route_and_preserves_details(tmp_path):
     rows = _depot_rows(data["route_id"])
     assert [(row["direction"], row["external_code"]) for row in rows] == [
         ("depot_in", "200"),
-        ("depot_in", "300"),
+        ("depot_in", "401"),
         ("depot_out", "300"),
         ("depot_out", "201"),
     ]
@@ -392,3 +392,144 @@ def test_erm_route_import_does_not_choose_ambiguous_same_name_stop(tmp_path):
     )
     assert first_depot_out["stop_id"] not in {first_id, second_id}
     assert first_depot_out["external_code"] == "300"
+
+
+def test_erm_import_unique_name_with_conflicting_discriminators_creates_new_stop(tmp_path):
+    client = make_client(tmp_path)
+
+    import app.db as db
+    con = db.connect()
+    try:
+        cursor = con.execute(
+            "INSERT INTO stops(external_code,name,address,latitude,longitude) "
+            "VALUES(?,?,?,?,?)",
+            ("X", "Автопарк", "Другая улица", 1.0, 1.0),
+        )
+        conflicting_id = cursor.lastrowid
+        con.commit()
+    finally:
+        con.close()
+
+    response = client.post(
+        "/api/import/routes/erm",
+        files={"file": ("erm.xlsx", build_erm_workbook(), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+    )
+
+    assert response.status_code == 200, response.text
+    first_depot_out = next(
+        row for row in _depot_rows(response.json()["route_id"])
+        if row["direction"] == "depot_out" and row["sequence"] == 1
+    )
+    assert first_depot_out["stop_id"] != conflicting_id
+    assert first_depot_out["external_code"] == "300"
+    assert first_depot_out["address"] == "Гаражная улица"
+    assert first_depot_out["latitude"] == pytest.approx(56.801)
+    assert first_depot_out["longitude"] == pytest.approx(35.901)
+
+
+def test_empty_or_malformed_depot_sections_preserve_existing_rows(tmp_path):
+    client = make_client(tmp_path)
+    imported = client.post(
+        "/api/import/routes/erm",
+        files={"file": ("erm.xlsx", build_erm_workbook(), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+    )
+    assert imported.status_code == 200, imported.text
+    route_id = imported.json()["route_id"]
+    before = [
+        (row["stop_id"], row["sequence"], row["source"])
+        for row in _depot_rows(route_id) if row["direction"] == "depot_out"
+    ]
+
+    import app.db as db
+    from app.route_depot import normalize_erm_depot_sections
+
+    con = db.connect()
+    try:
+        normalize_erm_depot_sections(con, route_id, {
+            "sheets": {"из парка": {"sections": [
+                {"kind": "из парка", "stops": []},
+                {"kind": "из парка", "stops": "bad"},
+                {"kind": "из парка", "stops": [None, 7]},
+            ]}}
+        })
+        con.commit()
+        state_count = con.execute(
+            "SELECT COUNT(*) FROM route_depot_section_state "
+            "WHERE route_id=? AND direction='depot_out'",
+            (route_id,),
+        ).fetchone()[0]
+    finally:
+        con.close()
+
+    after = [
+        (row["stop_id"], row["sequence"], row["source"])
+        for row in _depot_rows(route_id) if row["direction"] == "depot_out"
+    ]
+    assert after == before
+    assert state_count == 1
+
+
+def test_erm_depot_normalization_scans_stop_registry_once_and_reuses_new_stop(tmp_path):
+    client = make_client(tmp_path)
+    created = client.post("/api/refs/routes", json={
+        "number": "77", "name": "Тестовый маршрут", "version": 1,
+    })
+    assert created.status_code == 200, created.text
+    route_id = created.json()["id"]
+
+    stops = [
+        {
+            "stop_id": 900 + index,
+            "stop_name": f"Новая {index}",
+            "street": f"Улица {index}",
+            "lat": 55.0 + index / 1000,
+            "lon": 37.0 + index / 1000,
+            "distance_km": 0.1,
+            "travel_time": "00:01:00",
+        }
+        for index in range(12)
+    ]
+    stops[0].update({
+        "address": None,
+        "latitude": None,
+        "longitude": None,
+    })
+    stops.append(dict(stops[0]))
+    details = {"sheets": {"из парка": {"sections": [{
+        "kind": "из парка", "stops": stops,
+    }]}}}
+
+    import app.db as db
+    from app.route_depot import normalize_erm_depot_sections
+
+    statements = []
+    con = db.connect()
+    try:
+        con.set_trace_callback(statements.append)
+        normalize_erm_depot_sections(con, route_id, details)
+        con.set_trace_callback(None)
+        con.commit()
+        rows = db.rows(con.execute(
+            "SELECT r.stop_id,s.address,s.latitude,s.longitude "
+            "FROM route_depot_stops r JOIN stops s ON s.id=r.stop_id "
+            "WHERE r.route_id=? AND r.direction='depot_out' "
+            "ORDER BY r.sequence",
+            (route_id,),
+        ))
+        first_code_count = con.execute(
+            "SELECT COUNT(*) FROM stops WHERE external_code='900'"
+        ).fetchone()[0]
+    finally:
+        con.close()
+
+    full_scans = [
+        statement for statement in statements
+        if statement.strip().upper() == "SELECT * FROM STOPS ORDER BY ID"
+    ]
+    assert len(full_scans) == 1
+    assert len(rows) == 13
+    assert rows[0]["stop_id"] == rows[-1]["stop_id"]
+    assert first_code_count == 1
+    assert rows[0]["address"] == "Улица 0"
+    assert rows[0]["latitude"] == pytest.approx(55.0)
+    assert rows[0]["longitude"] == pytest.approx(37.0)
