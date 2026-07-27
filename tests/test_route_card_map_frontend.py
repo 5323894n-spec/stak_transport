@@ -31,3 +31,13 @@ def test_leaflet_is_vendored_and_loaded_before_route_card():
     leaflet_script = "/static/vendor/leaflet/leaflet.js?v=1.9.4"
     assert leaflet_script in index
     assert index.index(leaflet_script) < index.index("/static/route-card.js")
+
+
+def test_route_card_keeps_svg_fallback_beside_the_map_canvas():
+    source = (ROOT / "static" / "route-card.js").read_text(encoding="utf-8")
+
+    assert "function routeCardFallbackMap" in source
+    assert 'class="route-map-canvas"' in source
+    assert 'class="route-map-fallback"' in source
+    assert 'aria-label="Схема трассы без картографической подложки"' in source
+    assert "Подложка OpenStreetMap недоступна" in source

@@ -197,20 +197,35 @@ function routeMapPoints(state) {
   return { rows, points };
 }
 
-function routeCardMap(state) {
-  const plotted = routeMapPoints(state), missing = routeCardDraft(state).length - plotted.rows.length;
+function routeCardFallbackMap(state, plotted = routeMapPoints(state)) {
   const line = plotted.points.map(p => `${p.x},${p.y}`).join(" ");
   const nodes = plotted.points.map((p, i) => `<g class="route-map-node" data-route-stop-id="${p.row.stop_id}"><circle cx="${p.x}" cy="${p.y}" r="8"></circle><text x="${p.x + 11}" y="${p.y - 10}">${i + 1}. ${esc(p.row.stop.name)}</text></g>`).join("");
+  return plotted.points.length ? `<svg viewBox="0 0 800 360" role="img" aria-label="Схема трассы без картографической подложки"><polyline points="${line}"></polyline>${nodes}</svg>` : '<div class="route-empty">Для схемы добавьте координаты остановок</div>';
+}
+
+function routeCardMap(state) {
+  const plotted = routeMapPoints(state), missing = routeCardDraft(state).length - plotted.rows.length;
   const geo = state.geometry ? `<span class="badge b-inf">OSRM: ${esc(state.geometry.type || "геометрия получена")}</span>` : "";
   return `${routeDirectionSwitch(state)}<div class="route-card-toolbar"><div><b>Координатная схема</b><div class="muted">Схема без географической подложки. Маркер можно перетащить; новые координаты сохранятся после отпускания.</div></div>
     <button class="btn sec" onclick="routeCardOsrmPreview()">Рассчитать через OSRM</button></div>
     ${missing ? `<div class="vio w"><b>Не все остановки показаны</b>Без координат: ${missing}. Добавьте широту и долготу на вкладке остановок.</div>` : ""}
-    <div class="route-map">${plotted.points.length ? `<svg viewBox="0 0 800 360" role="img" aria-label="Схема трассы"><polyline points="${line}"></polyline>${nodes}</svg>` : '<div class="route-empty">Для схемы добавьте координаты остановок</div>'}</div>
+    <div class="route-map-warning" hidden>Подложка OpenStreetMap недоступна</div>
+    <div class="route-map-canvas" hidden></div>
+    <div class="route-map-fallback">${routeCardFallbackMap(state, plotted)}</div>
     <div class="route-map-legend">${geo}<span>● остановка</span><span>— последовательность движения</span></div>${routeOsrmDiff(state)}`;
 }
 
+function routeCardShowMapFallback(message = "Подложка OpenStreetMap недоступна") {
+  const canvas = document.querySelector(".route-map-canvas");
+  const fallback = document.querySelector(".route-map-fallback");
+  const warning = document.querySelector(".route-map-warning");
+  if (canvas) canvas.hidden = true;
+  if (fallback) fallback.hidden = false;
+  if (warning) { warning.textContent = message; warning.hidden = false; }
+}
+
 function routeCardBindMap(state) {
-  const svg = document.querySelector(".route-map svg");
+  const svg = document.querySelector(".route-map-fallback svg");
   if (!svg || !state.mapBounds) return;
   let drag = null;
   const position = event => {
