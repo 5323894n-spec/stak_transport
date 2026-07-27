@@ -1,1 +1,4 @@
-static/vendor/leaflet/** -text
+static/vendor/leaflet/leaflet.js -text
+static/vendor/leaflet/leaflet.css text eol=crlf
+static/vendor/leaflet/LICENSE text eol=crlf
+static/vendor/leaflet/images/** -text
