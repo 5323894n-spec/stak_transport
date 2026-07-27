@@ -48,6 +48,25 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_route_stops_direction_sequence
   ON route_stops(route_id,direction,sequence);
 CREATE INDEX IF NOT EXISTS idx_route_stops_stop ON route_stops(stop_id);
 
+CREATE TABLE IF NOT EXISTS route_depot_stops(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  route_id INTEGER NOT NULL REFERENCES routes(id) ON DELETE CASCADE,
+  direction TEXT NOT NULL CHECK(direction IN ('depot_out','depot_in')),
+  stop_id INTEGER NOT NULL REFERENCES stops(id),
+  sequence INTEGER NOT NULL,
+  distance_from_prev_km REAL NOT NULL DEFAULT 0
+    CHECK(distance_from_prev_km >= 0),
+  run_time_day_sec INTEGER NOT NULL DEFAULT 0 CHECK(run_time_day_sec >= 0),
+  run_time_night_sec INTEGER NOT NULL DEFAULT 0 CHECK(run_time_night_sec >= 0),
+  source TEXT NOT NULL DEFAULT 'manual',
+  source_detail TEXT,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE(route_id,direction,sequence)
+);
+CREATE INDEX IF NOT EXISTS idx_route_depot_stops_stop
+  ON route_depot_stops(stop_id);
+
 CREATE TABLE IF NOT EXISTS route_migration_log(
   id INTEGER PRIMARY KEY,
   route_id INTEGER NOT NULL REFERENCES routes(id) ON DELETE CASCADE,
@@ -249,6 +268,32 @@ def _add_column(con, table, name, definition):
 
 def migrate_route_network(con):
     con.executescript(ROUTE_NETWORK_SCHEMA)
+    _add_column(
+        con,
+        "route_stops",
+        "run_time_day_sec",
+        "INTEGER NOT NULL DEFAULT 0 CHECK(run_time_day_sec >= 0)",
+    )
+    _add_column(
+        con,
+        "route_stops",
+        "run_time_night_sec",
+        "INTEGER NOT NULL DEFAULT 0 CHECK(run_time_night_sec >= 0)",
+    )
+    con.execute(
+        """
+        UPDATE route_stops
+        SET run_time_day_sec=run_time_sec
+        WHERE run_time_day_sec=0 AND run_time_sec>0
+        """
+    )
+    con.execute(
+        """
+        UPDATE route_stops
+        SET run_time_night_sec=run_time_sec
+        WHERE run_time_night_sec=0 AND run_time_sec>0
+        """
+    )
     _add_column(
         con, "route_trips", "period_id", "INTEGER REFERENCES day_periods(id)"
     )
