@@ -13,6 +13,12 @@ from .route_depot import (
     replace_depot_rows,
     validate_direction,
 )
+from .route_document_data import load_route_document_data, parse_document_options
+from .route_document_xlsx import (
+    _xlsx_download_response,
+    build_schedule_workbook,
+    schedule_filename,
+)
 
 
 router = APIRouter(prefix="/api")
@@ -71,6 +77,33 @@ def depot_stops_replace(
             raise HTTPException(
                 409, "Не удалось сохранить парковую трассу: конфликт данных"
             ) from exc
-        return {"ok": True, "route_id": route_id, "direction": direction, "items": saved}
+        return {
+            "ok": True, "route_id": route_id,
+            "direction": direction, "items": saved,
+        }
+    finally:
+        con.close()
+
+
+@router.get("/routes/{route_id}/schedule-document.xlsx")
+def route_schedule_document(
+    route_id: int,
+    season: str,
+    effective_date: str,
+    user=Depends(current_user),
+):
+    try:
+        options = parse_document_options(season, effective_date)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    con = db.connect()
+    try:
+        try:
+            data = load_route_document_data(con, route_id)
+        except ValueError as exc:
+            status = 404 if str(exc) == "Маршрут не найден" else 400
+            raise HTTPException(status, str(exc)) from exc
+        workbook = build_schedule_workbook(data, options)
+        return _xlsx_download_response(workbook, schedule_filename(data, options))
     finally:
         con.close()
