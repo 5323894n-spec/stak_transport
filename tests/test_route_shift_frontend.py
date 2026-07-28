@@ -77,5 +77,5 @@ def test_schedule_shift_workspace_has_state_styles():
 def test_schedule_assets_use_route_cache_version_3_7():
     index = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
 
-    assert 'styles.css?v=3.2&amp;route=3.7' in index
-    assert 'app.js?v=3.2&amp;route=3.7' in index
+    assert 'styles.css?v=3.2&amp;route=3.8' in index
+    assert 'app.js?v=3.2&amp;route=3.8' in index

@@ -97,6 +97,80 @@ def test_replace_trace_syncs_legacy_route_fields(client, route_id):
     assert route["length_km"] == 1.5
 
 
+def test_replace_trace_saves_day_and_night_runtime_variants(client, route_id):
+    first = create_stop(client, "Вокзал", "100")
+    second = create_stop(client, "Автовокзал", "101")
+
+    response = client.put(f"/api/routes/{route_id}/stops/forward", json={"items": [
+        {"stop_id": first, "sequence": 1, "distance_from_prev_km": 0},
+        {"stop_id": second, "sequence": 2, "distance_from_prev_km": 1.5,
+         "run_time_sec": 80, "run_time_day_sec": 70,
+         "run_time_night_sec": 55, "dwell_time_sec": 30},
+    ]})
+
+    assert response.status_code == 200, response.text
+    saved = response.json()["items"][1]
+    assert saved["run_time_sec"] == 80
+    assert saved["run_time_day_sec"] == 70
+    assert saved["run_time_night_sec"] == 55
+    loaded = client.get(f"/api/routes/{route_id}/network").json()["forward"][1]
+    assert loaded["run_time_sec"] == 80
+    assert loaded["run_time_day_sec"] == 70
+    assert loaded["run_time_night_sec"] == 55
+
+
+def test_replace_trace_defaults_missing_runtime_variants_to_main_runtime(
+    client, route_id
+):
+    stop_id = create_stop(client, "Вокзал", "100")
+
+    response = client.put(f"/api/routes/{route_id}/stops/backward", json={"items": [
+        {"stop_id": stop_id, "sequence": 1, "distance_from_prev_km": 0,
+         "run_time_sec": 125},
+    ]})
+
+    assert response.status_code == 200, response.text
+    row = response.json()["items"][0]
+    assert row["run_time_sec"] == 125
+    assert row["run_time_day_sec"] == 125
+    assert row["run_time_night_sec"] == 125
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("run_time_day_sec", -1),
+        ("run_time_night_sec", True),
+        ("run_time_day_sec", 1.5),
+        ("run_time_night_sec", "1e999"),
+        ("run_time_sec", 2**63),
+    ],
+)
+def test_replace_trace_rejects_invalid_runtime_values(
+    client, route_id, field, value
+):
+    stop_id = create_stop(client, "Вокзал", "100")
+    item = {
+        "stop_id": stop_id,
+        "sequence": 1,
+        "distance_from_prev_km": 0,
+        "run_time_sec": 60,
+        "run_time_day_sec": 60,
+        "run_time_night_sec": 60,
+    }
+    item[field] = value
+
+    response = client.put(
+        f"/api/routes/{route_id}/stops/forward", json={"items": [item]}
+    )
+
+    assert response.status_code == 400
+    assert (
+        "целым числом" in response.json()["detail"]
+        or "отрицатель" in response.json()["detail"]
+    )
+
+
 def test_replace_trace_rejects_duplicate_sequence(client, route_id):
     first = create_stop(client, "Вокзал", "100")
     second = create_stop(client, "Автовокзал", "101")

@@ -21,4 +21,4 @@ def test_matrix_styles_and_cache_key_are_present():
     assert ".schedule-stop-matrix" in styles
     assert ".schedule-stop-time-manual" in styles
     assert ".schedule-generation-diff" in styles
-    assert "route=3.7" in index
+    assert "route=3.8" in index

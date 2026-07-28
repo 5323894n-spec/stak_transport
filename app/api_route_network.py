@@ -4,6 +4,7 @@ import datetime
 import json
 import secrets
 import sqlite3
+from decimal import Decimal, InvalidOperation
 
 from fastapi import APIRouter, Body, Depends, File, HTTPException, UploadFile
 
@@ -23,6 +24,8 @@ STOP_FIELDS = (
     "active", "notes",
 )
 
+_SQLITE_INTEGER_MAX = 2**63 - 1
+
 
 def _now():
     return datetime.datetime.now().isoformat(timespec="seconds")
@@ -40,6 +43,42 @@ def _stop_or_404(con, stop_id):
     if not stop:
         raise HTTPException(404, f"Остановка {stop_id} не найдена")
     return stop
+
+
+def _nonnegative_runtime(value, label):
+    if isinstance(value, bool) or value is None:
+        raise ValueError(f"{label} должно быть целым числом")
+    try:
+        number = Decimal(str(value))
+    except (InvalidOperation, ValueError):
+        raise ValueError(f"{label} должно быть целым числом") from None
+    if not number.is_finite() or number != number.to_integral_value():
+        raise ValueError(f"{label} должно быть целым числом")
+    if number < 0:
+        raise ValueError(f"{label} не может быть отрицательным")
+    result = int(number)
+    if result > _SQLITE_INTEGER_MAX:
+        raise ValueError(
+            f"{label} должно быть целым числом в допустимом диапазоне"
+        )
+    return result
+
+
+def _normalize_trace_runtimes(items):
+    for item in items:
+        main = _nonnegative_runtime(item.get("run_time_sec", 0), "Время хода")
+        day = _nonnegative_runtime(
+            item["run_time_day_sec"] if "run_time_day_sec" in item else main,
+            "Дневное время хода",
+        )
+        night = _nonnegative_runtime(
+            item["run_time_night_sec"] if "run_time_night_sec" in item else main,
+            "Ночное время хода",
+        )
+        item["run_time_sec"] = main
+        item["run_time_day_sec"] = day
+        item["run_time_night_sec"] = night
+    return items
 
 
 def _direction_rows(con, route_id, direction):
@@ -191,6 +230,7 @@ def route_stops_replace(route_id: int, direction: str, payload: dict = Body(...)
         raise HTTPException(400, "Поле items должно быть списком")
     try:
         items = recalculate_trace(source_items)
+        _normalize_trace_runtimes(items)
     except (KeyError, TypeError, ValueError) as exc:
         raise HTTPException(400, str(exc))
 
@@ -207,13 +247,16 @@ def route_stops_replace(route_id: int, direction: str, payload: dict = Body(...)
             con.execute(
                 "INSERT INTO route_stops("
                 "route_id,direction,stop_id,sequence,distance_from_prev_km,cumulative_km,"
-                "run_time_sec,dwell_time_sec,distance_source,boarding_allowed,"
+                "run_time_sec,run_time_day_sec,run_time_night_sec,dwell_time_sec,"
+                "distance_source,boarding_allowed,"
                 "alighting_allowed,is_timing_point,source_detail,created_at,updated_at"
-                ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     route_id, direction, int(item["stop_id"]), int(item["sequence"]),
                     item["distance_from_prev_km"], item["cumulative_km"],
-                    int(item.get("run_time_sec") or 0), int(item.get("dwell_time_sec") or 0),
+                    item["run_time_sec"], item["run_time_day_sec"],
+                    item["run_time_night_sec"],
+                    int(item.get("dwell_time_sec") or 0),
                     item.get("distance_source") or "manual",
                     1 if item.get("boarding_allowed", 1) else 0,
                     1 if item.get("alighting_allowed", 1) else 0,

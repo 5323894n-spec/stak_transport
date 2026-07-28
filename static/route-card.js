@@ -4,6 +4,7 @@
 const ROUTE_CARD_TABS = [
   ["passport", "Паспорт"], ["stops", "Остановки и направления"],
   ["map", "Схема трассы"], ["segments", "Перегоны и время"],
+  ["depot", "Нулевые рейсы"],
   ["periods", "Периоды дня"],
   ["history", "Импорт и история"],
 ];
@@ -19,6 +20,12 @@ function routeCardState(routeId) {
       periodTemplateId: "", periodTemplatePreview: null,
       periodCalcPreview: null, periodError: "", periodContinuous: false,
       periodsLoading: false,
+      depotDirection: "depot_out",
+      depotDrafts: { depot_out: null, depot_in: null },
+      depotStopOptions: [], depotErrors: {}, depotError: "",
+      depotLoading: false, depotSaving: false, depotLoadToken: 0,
+      documentDialogOpen: false, documentType: "schedule",
+      documentSeason: "winter", documentDate: today(),
     };
   }
   return window._routeCard;
@@ -34,6 +41,10 @@ function routeCardDraft(state, direction = state.direction) {
       id: row.id, stop_id: row.stop.id, stop: { ...row.stop }, sequence: row.sequence,
       distance_from_prev_km: +(row.distance_from_prev_km || 0),
       cumulative_km: +(row.cumulative_km || 0), run_time_sec: +(row.run_time_sec || 0),
+      run_time_day_sec: row.run_time_day_sec == null
+        ? +(row.run_time_sec || 0) : +row.run_time_day_sec,
+      run_time_night_sec: row.run_time_night_sec == null
+        ? +(row.run_time_sec || 0) : +row.run_time_night_sec,
       dwell_time_sec: +(row.dwell_time_sec || 0),
       distance_source: row.distance_source || "manual",
       boarding_allowed: row.boarding_allowed !== 0,
@@ -57,6 +68,7 @@ VIEWS.routeCard = async function routeCardView(routeId) {
   state.network = await api(`/api/routes/${state.routeId}/network`);
   renderRouteCard(state);
   if (state.tab === "periods") await routeCardLoadPeriods();
+  if (state.tab === "depot") await routeCardLoadDepot(state.depotDirection);
 };
 
 async function routeCardTab(tab) {
@@ -65,6 +77,9 @@ async function routeCardTab(tab) {
   renderRouteCard(state);
   if (tab === "periods" && !state.periodDrafts[state.periodDay]) {
     await routeCardLoadPeriods();
+  }
+  if (tab === "depot" && !state.depotDrafts[state.depotDirection]) {
+    await routeCardLoadDepot(state.depotDirection);
   }
 }
 
@@ -76,12 +91,41 @@ function routeCardDirection(direction) {
   renderRouteCard(state);
 }
 
+function routeCardCanEdit() {
+  return !!USER && ["админ", "эксплуатация"].includes(USER.role);
+}
+
+function routeCardOpenDocumentDialog() {
+  window._routeCard.documentDialogOpen = true;
+  renderRouteCard(window._routeCard);
+}
+
+function routeCardCloseDocumentDialog() {
+  window._routeCard.documentDialogOpen = false;
+  renderRouteCard(window._routeCard);
+}
+
+function routeCardDocumentDialog(state) {
+  if (!state.documentDialogOpen) return "";
+  return `<div class="modal-bg route-document-dialog-bg" role="presentation">
+    <div class="modal route-document-dialog" role="dialog" aria-modal="true" aria-labelledby="route-document-title">
+      <h3 id="route-document-title">Экспорт документов</h3>
+      <p class="muted">Параметры уже можно проверить. Формирование файлов будет подключено на следующем этапе.</p>
+      <div class="route-document-fields">
+        <label>Документ<select onchange="window._routeCard.documentType=this.value"><option value="schedule" ${state.documentType === "schedule" ? "selected" : ""}>Расписание</option><option value="erm" ${state.documentType === "erm" ? "selected" : ""}>ЭРМ</option></select></label>
+        <label>Сезон<select onchange="window._routeCard.documentSeason=this.value"><option value="winter" ${state.documentSeason === "winter" ? "selected" : ""}>Зима</option><option value="summer" ${state.documentSeason === "summer" ? "selected" : ""}>Лето</option></select></label>
+        <label>Дата начала действия<input type="date" value="${esc(state.documentDate)}" onchange="window._routeCard.documentDate=this.value"></label>
+      </div>
+      <div class="foot"><button class="btn sec" onclick="routeCardCloseDocumentDialog()">Закрыть</button><button class="btn" disabled title="Будет доступно после подключения формирования документов">Сформировать</button></div>
+    </div></div>`;
+}
+
 function routeCardHeader(state) {
   const r = state.network.route, f = state.network.forward.length, b = state.network.backward.length;
   return `<header class="route-card-head"><div><button class="btn ghost" onclick="history.back()">← Назад</button>
     <h2>Маршрут № ${esc(r.number)} · ${esc(r.name || "без названия")}</h2>
     <p>${esc(r.work_days || "режим работы не указан")} · ${esc(r.season || "сезонность не указана")}</p></div>
-    <div class="route-card-status"><span class="badge ${r.active === 0 ? "b-mut" : "b-ok"}">${r.active === 0 ? "неактивен" : "действует"}</span></div></header>
+    <div class="route-card-head-actions"><button class="btn sec route-document-open" onclick="routeCardOpenDocumentDialog()">Экспорт документов</button><div class="route-card-status"><span class="badge ${r.active === 0 ? "b-mut" : "b-ok"}">${r.active === 0 ? "неактивен" : "действует"}</span></div></div></header>
     <div class="cards route-kpis"><div class="card"><div class="num">${f}</div><div class="lbl">остановок прямо</div></div>
     <div class="card"><div class="num">${b}</div><div class="lbl">остановок обратно</div></div>
     <div class="card"><div class="num">${Number(state.network.totals.forward_km || 0).toLocaleString("ru-RU")}</div><div class="lbl">км прямо</div></div>
@@ -138,7 +182,7 @@ async function routeCardAddStop() {
   const value = await formModal("Добавить остановку", [{ k: "stop_id", label: "Остановка", type: "select", options: data.items.map(s => [s.id, `${s.name}${s.external_code ? " · " + s.external_code : ""}`]) }]);
   if (!value) return;
   const stop = data.items.find(s => s.id === +value.stop_id);
-  routeCardDraft(state).push({ stop_id: stop.id, stop: { ...stop }, distance_from_prev_km: 0, run_time_sec: 0, dwell_time_sec: 0, distance_source: "manual", boarding_allowed: true, alighting_allowed: true, is_timing_point: false });
+  routeCardDraft(state).push({ stop_id: stop.id, stop: { ...stop }, distance_from_prev_km: 0, run_time_sec: 0, run_time_day_sec: 0, run_time_night_sec: 0, dwell_time_sec: 0, distance_source: "manual", boarding_allowed: true, alighting_allowed: true, is_timing_point: false });
   renderRouteCard(state);
 }
 
@@ -159,6 +203,8 @@ function routeTracePayload(state) {
   return routeCardDraft(state).map((row, index) => ({
     stop_id: row.stop_id, sequence: index + 1,
     distance_from_prev_km: index ? +(row.distance_from_prev_km || 0) : 0,
+    run_time_day_sec: +(row.run_time_day_sec || 0),
+    run_time_night_sec: +(row.run_time_night_sec || 0),
     run_time_sec: +(row.run_time_sec || 0), dwell_time_sec: +(row.dwell_time_sec || 0),
     distance_source: row.distance_source || "manual", boarding_allowed: row.boarding_allowed,
     alighting_allowed: row.alighting_allowed, is_timing_point: row.is_timing_point,
@@ -172,14 +218,207 @@ async function routeCardSaveTrace() {
   toast("Трасса сохранена"); await routeCardReload();
 }
 
+function routeCardDepotRows(state = window._routeCard) {
+  return state.depotDrafts[state.depotDirection] || [];
+}
+
+function routeCardDepotDirectionLabel(direction) {
+  return direction === "depot_out" ? "Из парка" : "В парк";
+}
+
+function routeCardDepotRow(row) {
+  return {
+    stop_id: row.stop_id == null ? "" : row.stop_id,
+    stop: row.stop ? { ...row.stop } : null,
+    distance_from_prev_km: row.distance_from_prev_km == null
+      ? "0" : String(row.distance_from_prev_km),
+    run_time_day_sec: row.run_time_day_sec == null
+      ? "0" : String(row.run_time_day_sec),
+    run_time_night_sec: row.run_time_night_sec == null
+      ? "0" : String(row.run_time_night_sec),
+  };
+}
+
+async function routeCardLoadDepot(direction = window._routeCard.depotDirection) {
+  const state = window._routeCard;
+  const requestToken = ++state.depotLoadToken;
+  state.depotLoading = true; state.depotError = "";
+  renderRouteCard(state);
+  try {
+    const [depot, stops] = await Promise.all([
+      api(`/api/routes/${state.routeId}/depot-stops?direction=${direction}`),
+      api("/api/stops?active=1"),
+    ]);
+    if (requestToken !== state.depotLoadToken || direction !== state.depotDirection) return;
+    state.depotStopOptions = stops.items || [];
+    state.depotDrafts[direction] = (depot.items || []).map(routeCardDepotRow);
+    state.depotErrors = {};
+  } catch (error) {
+    if (requestToken !== state.depotLoadToken) return;
+    state.depotError = error.message;
+  } finally {
+    if (requestToken === state.depotLoadToken) {
+      state.depotLoading = false;
+      renderRouteCard(state);
+    }
+  }
+}
+
+async function routeCardDepotDirection(direction) {
+  if (!["depot_out", "depot_in"].includes(direction)) return;
+  const state = window._routeCard;
+  state.depotDirection = direction; state.depotError = "";
+  renderRouteCard(state);
+  if (!state.depotDrafts[direction]) await routeCardLoadDepot(direction);
+}
+
+function routeCardDepotChange(index, field, value) {
+  const state = window._routeCard, row = routeCardDepotRows(state)[index];
+  if (!row) return;
+  if (field === "stop_id") {
+    row.stop_id = value === "" ? "" : +value;
+    row.stop = state.depotStopOptions.find(stop => stop.id === +value) || null;
+    delete state.depotErrors[index];
+    renderRouteCard(state);
+    return;
+  }
+  row[field] = value;
+  delete state.depotErrors[index];
+}
+
+function routeCardDepotMove(index, delta) {
+  const state = window._routeCard, rows = routeCardDepotRows(state);
+  const next = index + delta;
+  if (!routeCardCanEdit() || next < 0 || next >= rows.length) return;
+  [rows[index], rows[next]] = [rows[next], rows[index]];
+  state.depotErrors = {};
+  renderRouteCard(state);
+}
+
+function routeCardDepotRemove(index) {
+  if (!routeCardCanEdit()) return;
+  const state = window._routeCard;
+  routeCardDepotRows(state).splice(index, 1);
+  state.depotErrors = {};
+  renderRouteCard(state);
+}
+
+async function routeCardDepotAdd() {
+  if (!routeCardCanEdit()) return;
+  const state = window._routeCard;
+  if (!state.depotStopOptions.length) {
+    const stops = await api("/api/stops?active=1");
+    state.depotStopOptions = stops.items || [];
+  }
+  if (!state.depotStopOptions.length) {
+    toast("Сначала создайте остановку в справочнике", true); return;
+  }
+  const value = await formModal("Добавить остановку нулевого рейса", [{
+    k: "stop_id", label: "Остановка", type: "select",
+    options: state.depotStopOptions.map(stop => [
+      stop.id, `${stop.name}${stop.external_code ? " · " + stop.external_code : ""}`,
+    ]),
+  }]);
+  if (!value) return;
+  const stop = state.depotStopOptions.find(item => item.id === +value.stop_id);
+  routeCardDepotRows(state).push(routeCardDepotRow({ stop_id: stop.id, stop }));
+  renderRouteCard(state);
+}
+
+function routeCardDepotRuntime(value, label) {
+  const text = String(value == null ? "" : value).trim();
+  if (!/^\d+$/.test(text)) return { error: `${label} должно быть целым числом секунд` };
+  const number = Number(text);
+  if (!Number.isSafeInteger(number) || number < 0) {
+    return { error: `${label} должно быть целым числом секунд` };
+  }
+  return { value: number };
+}
+
+function routeCardDepotPayload(state = window._routeCard) {
+  const errors = {}, items = [];
+  routeCardDepotRows(state).forEach((row, index) => {
+    const rowErrors = [];
+    const stopId = Number(row.stop_id);
+    if (!Number.isSafeInteger(stopId) || stopId <= 0) {
+      rowErrors.push("Остановка обязательна");
+    }
+    const distanceText = String(
+      row.distance_from_prev_km == null ? "" : row.distance_from_prev_km
+    ).trim().replace(",", ".");
+    const distance = Number(distanceText);
+    if (!distanceText || !Number.isFinite(distance) || distance < 0) {
+      rowErrors.push("Расстояние должно быть конечным неотрицательным числом");
+    }
+    const day = routeCardDepotRuntime(row.run_time_day_sec, "Дневное время");
+    const night = routeCardDepotRuntime(row.run_time_night_sec, "Ночное время");
+    if (day.error) rowErrors.push(day.error);
+    if (night.error) rowErrors.push(night.error);
+    if (rowErrors.length) errors[index] = rowErrors.join(". ");
+    else items.push({
+      stop_id: stopId, sequence: index + 1,
+      distance_from_prev_km: distance,
+      run_time_day_sec: day.value, run_time_night_sec: night.value,
+    });
+  });
+  state.depotErrors = errors;
+  return Object.keys(errors).length ? null : items;
+}
+
+async function routeCardSaveDepot() {
+  const state = window._routeCard;
+  if (!routeCardCanEdit()) return;
+  const items = routeCardDepotPayload(state);
+  if (items === null) { renderRouteCard(state); return; }
+  state.depotSaving = true; state.depotError = ""; renderRouteCard(state);
+  try {
+    await api(`/api/routes/${state.routeId}/depot-stops/${state.depotDirection}`, {
+      method: "PUT", body: { items },
+    });
+    state.depotSaving = false;
+    toast(`${routeCardDepotDirectionLabel(state.depotDirection)}: данные сохранены`);
+    await routeCardLoadDepot(state.depotDirection);
+  } catch (error) {
+    state.depotSaving = false; state.depotError = error.message;
+    toast(error.message, true); renderRouteCard(state);
+  }
+}
+
+function routeCardDepot(state) {
+  const canEdit = routeCardCanEdit();
+  if (state.depotLoading) return '<div class="route-empty">Загрузка нулевых рейсов…</div>';
+  const rows = routeCardDepotRows(state);
+  const content = rows.map((row, index) => {
+    const options = state.depotStopOptions.map(stop => `<option value="${stop.id}" ${+row.stop_id === stop.id ? "selected" : ""}>${esc(stop.name)}${stop.external_code ? " · " + esc(stop.external_code) : ""}</option>`).join("");
+    const unresolved = row.stop && !state.depotStopOptions.some(stop => stop.id === +row.stop_id)
+      ? `<option value="${esc(row.stop_id)}" selected>${esc(row.stop.name)} · архивная</option>` : "";
+    const disabled = canEdit ? "" : "disabled";
+    return `<div class="route-depot-row">
+      <span class="route-stop-seq">${index + 1}</span>
+      <label class="route-depot-stop">Остановка<select ${disabled} onchange="routeCardDepotChange(${index},'stop_id',this.value)"><option value="">Выберите остановку</option>${unresolved}${options}</select></label>
+      <label>Расстояние, км<input type="text" inputmode="decimal" value="${esc(row.distance_from_prev_km)}" ${disabled} onchange="routeCardDepotChange(${index},'distance_from_prev_km',this.value)"></label>
+      <label>Днём, сек<input type="text" inputmode="numeric" value="${esc(row.run_time_day_sec)}" ${disabled} onchange="routeCardDepotChange(${index},'run_time_day_sec',this.value)"></label>
+      <label>Ночью, сек<input type="text" inputmode="numeric" value="${esc(row.run_time_night_sec)}" ${disabled} onchange="routeCardDepotChange(${index},'run_time_night_sec',this.value)"></label>
+      <div class="route-stop-actions route-depot-editor-controls">${canEdit ? `<button class="btn small sec" onclick="routeCardDepotMove(${index},-1)" ${index ? "" : "disabled"}>↑</button><button class="btn small sec" onclick="routeCardDepotMove(${index},1)" ${index + 1 < rows.length ? "" : "disabled"}>↓</button><button class="btn small danger" onclick="routeCardDepotRemove(${index})">✕</button>` : ""}</div>
+      ${state.depotErrors[index] ? `<div class="route-depot-error" role="alert">${esc(state.depotErrors[index])}</div>` : ""}
+    </div>`;
+  }).join("");
+  return `<div class="route-depot-tabs"><button class="btn ${state.depotDirection === "depot_out" ? "" : "sec"}" onclick="routeCardDepotDirection('depot_out')">Из парка</button><button class="btn ${state.depotDirection === "depot_in" ? "" : "sec"}" onclick="routeCardDepotDirection('depot_in')">В парк</button></div>
+    <div class="route-card-toolbar route-depot-editor-controls"><div><b>${routeCardDepotDirectionLabel(state.depotDirection)}</b><div class="muted">Время указывается целыми секундами отдельно для дня и ночи.</div></div>${canEdit ? `<button class="btn sec" onclick="routeCardDepotAdd()">+ Остановка</button><button class="btn" onclick="routeCardSaveDepot()" ${state.depotSaving ? "disabled" : ""}>${state.depotSaving ? "Сохранение…" : "Сохранить"}</button>` : '<span class="badge b-mut">Только просмотр</span>'}</div>
+    ${state.depotError ? `<div class="vio r"><b>Не удалось выполнить действие</b>${esc(state.depotError)}</div>` : ""}
+    <div class="route-depot-grid">${content || '<div class="route-empty">Остановки нулевого рейса ещё не заданы. Пустой список можно сохранить, чтобы очистить направление.</div>'}</div>`;
+}
+
 function routeCardSegments(state) {
   const rows = routeCardDraft(state).map((row, index) => `<tr><td>${index + 1}</td><td>${esc(row.stop.name)}</td>
     <td><input type="number" min="0" step="0.001" value="${index ? esc(row.distance_from_prev_km) : 0}" ${index ? "" : "disabled"} onchange="routeCardSegment(${index},'distance_from_prev_km',this.value)"></td>
     <td><input type="number" min="0" step="1" value="${esc(row.run_time_sec)}" onchange="routeCardSegment(${index},'run_time_sec',this.value)"></td>
+    <td><input type="number" min="0" step="1" value="${esc(row.run_time_day_sec)}" onchange="routeCardSegment(${index},'run_time_day_sec',this.value)"></td>
+    <td><input type="number" min="0" step="1" value="${esc(row.run_time_night_sec)}" onchange="routeCardSegment(${index},'run_time_night_sec',this.value)"></td>
     <td><input type="number" min="0" step="1" value="${esc(row.dwell_time_sec)}" onchange="routeCardSegment(${index},'dwell_time_sec',this.value)"></td>
     <td>${esc(row.distance_source || "manual")}</td></tr>`).join("");
   return `${routeDirectionSwitch(state)}<div class="route-card-toolbar"><b>${routeDirectionLabel(state.direction)}</b><button class="btn" onclick="routeCardSaveTrace()">Сохранить перегоны</button></div>
-    ${tbl(["№", "Остановка", "От предыдущей, км", "Ход, сек", "Стоянка, сек", "Источник"], rows || '<tr><td colspan="6">Нет остановок</td></tr>')}`;
+    ${tbl(["№", "Остановка", "От предыдущей, км", "Основное, сек", "Днём, сек", "Ночью, сек", "Стоянка, сек", "Источник"], rows || '<tr><td colspan="8">Нет остановок</td></tr>')}`;
 }
 
 function routeCardSegment(index, field, value) {
@@ -623,6 +862,7 @@ function routeCardBody(state) {
   if (state.tab === "stops") return routeCardStops(state);
   if (state.tab === "map") return routeCardMap(state);
   if (state.tab === "segments") return routeCardSegments(state);
+  if (state.tab === "depot") return routeCardDepot(state);
   if (state.tab === "periods") return routeCardPeriods(state);
   return routeCardHistory(state);
 }
@@ -630,6 +870,6 @@ function routeCardBody(state) {
 function renderRouteCard(state) {
   routeCardDestroyMap();
   const tabs = ROUTE_CARD_TABS.map(([key, label]) => `<button class="route-tab ${state.tab === key ? "on" : ""}" onclick="routeCardTab('${key}')">${esc(label)}</button>`).join("");
-  $("content").innerHTML = `<div class="route-card">${routeCardHeader(state)}<nav class="route-tabs" aria-label="Разделы карточки маршрута">${tabs}</nav><div class="route-card-body">${routeCardBody(state)}</div></div>`;
+  $("content").innerHTML = `<div class="route-card">${routeCardHeader(state)}<nav class="route-tabs" aria-label="Разделы карточки маршрута">${tabs}</nav><div class="route-card-body">${routeCardBody(state)}</div></div>${routeCardDocumentDialog(state)}`;
   if (state.tab === "map") routeCardBindMap(state);
 }
