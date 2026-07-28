@@ -24,7 +24,7 @@ function routeCardState(routeId) {
       depotDrafts: { depot_out: null, depot_in: null },
       depotStopOptions: [], depotErrors: {}, depotError: "",
       depotLoading: false, depotSaving: false, depotLoadToken: 0, depotSaveToken: 0,
-      segmentErrors: {},
+      segmentErrors: { forward: {}, backward: {} },
       documentDialogOpen: false, documentType: "schedule",
       documentSeason: "winter", documentDate: today(),
     };
@@ -237,6 +237,13 @@ function routeCardRuntime(value, label) {
   return { value: number };
 }
 
+function routeCardSegmentErrors(state, direction = state.direction) {
+  if (!state.segmentErrors || !state.segmentErrors[direction]) {
+    state.segmentErrors = state.segmentErrors || {};
+    state.segmentErrors[direction] = {};
+  }
+  return state.segmentErrors[direction];
+}
 function routeTracePayload(state) {
   const errors = {}, items = [];
   routeCardDraft(state).forEach((row, index) => {
@@ -256,7 +263,8 @@ function routeTracePayload(state) {
       source_detail: row.source_detail || null,
     });
   });
-  state.segmentErrors = errors;
+  routeCardSegmentErrors(state);
+  state.segmentErrors[state.direction] = errors;
   return Object.keys(errors).length ? null : items;
 }
 
@@ -481,7 +489,7 @@ async function routeCardSaveDepot() {
 function routeCardDepot(state) {
   const canEdit = routeCardCanEdit(), locked = state.depotSaving;
   const tabDisabled = locked ? "disabled" : "";
-  const tabs = `<div class="route-depot-tabs"><button class="btn ${state.depotDirection === "depot_out" ? "" : "sec"}" onclick="routeCardDepotDirection('depot_out')" ${tabDisabled}>Из парка</button><button class="btn ${state.depotDirection === "depot_in" ? "" : "sec"}" onclick="routeCardDepotDirection('depot_in')" ${tabDisabled}>В парк</button></div>`;
+  const tabs = `<div class="route-depot-tabs"><button data-action="depot-direction-out" class="btn ${state.depotDirection === "depot_out" ? "" : "sec"}" onclick="routeCardDepotDirection('depot_out')" ${tabDisabled}>Из парка</button><button data-action="depot-direction-in" class="btn ${state.depotDirection === "depot_in" ? "" : "sec"}" onclick="routeCardDepotDirection('depot_in')" ${tabDisabled}>В парк</button></div>`;
   if (state.depotLoading) return `${tabs}<div class="route-empty">Загрузка нулевых рейсов…</div>`;
   const rows = routeCardDepotRows(state);
   if (!Array.isArray(rows)) {
@@ -497,21 +505,22 @@ function routeCardDepot(state) {
     const disabled = editorEnabled ? "" : "disabled";
     return `<div class="route-depot-row">
       <span class="route-stop-seq">${index + 1}</span>
-      <label class="route-depot-stop">Остановка<select ${disabled} onchange="routeCardDepotChange(${index},'stop_id',this.value)"><option value="">Выберите остановку</option>${unresolved}${options}</select></label>
-      <label>Расстояние, км<input type="text" inputmode="decimal" value="${esc(row.distance_from_prev_km)}" ${disabled} onchange="routeCardDepotChange(${index},'distance_from_prev_km',this.value)"></label>
-      <label>Днём, сек<input type="text" inputmode="numeric" value="${esc(row.run_time_day_sec)}" ${disabled} onchange="routeCardDepotChange(${index},'run_time_day_sec',this.value)"></label>
-      <label>Ночью, сек<input type="text" inputmode="numeric" value="${esc(row.run_time_night_sec)}" ${disabled} onchange="routeCardDepotChange(${index},'run_time_night_sec',this.value)"></label>
-      <div class="route-stop-actions route-depot-editor-controls">${canEdit ? `<button class="btn small sec" onclick="routeCardDepotMove(${index},-1)" ${!editorEnabled || !index ? "disabled" : ""}>↑</button><button class="btn small sec" onclick="routeCardDepotMove(${index},1)" ${!editorEnabled || index + 1 >= rows.length ? "disabled" : ""}>↓</button><button class="btn small danger" onclick="routeCardDepotRemove(${index})" ${disabled}>✕</button>` : ""}</div>
+      <label class="route-depot-stop">Остановка<select data-action="depot-stop-${index}" ${disabled} onchange="routeCardDepotChange(${index},'stop_id',this.value)"><option value="">Выберите остановку</option>${unresolved}${options}</select></label>
+      <label>Расстояние, км<input data-action="depot-distance-${index}" type="text" inputmode="decimal" value="${esc(row.distance_from_prev_km)}" ${disabled} onchange="routeCardDepotChange(${index},'distance_from_prev_km',this.value)"></label>
+      <label>Днём, сек<input data-action="depot-day-${index}" type="text" inputmode="numeric" value="${esc(row.run_time_day_sec)}" ${disabled} onchange="routeCardDepotChange(${index},'run_time_day_sec',this.value)"></label>
+      <label>Ночью, сек<input data-action="depot-night-${index}" type="text" inputmode="numeric" value="${esc(row.run_time_night_sec)}" ${disabled} onchange="routeCardDepotChange(${index},'run_time_night_sec',this.value)"></label>
+      <div class="route-stop-actions route-depot-editor-controls">${canEdit ? `<button data-action="depot-move-up-${index}" class="btn small sec" onclick="routeCardDepotMove(${index},-1)" ${!editorEnabled || !index ? "disabled" : ""}>↑</button><button data-action="depot-move-down-${index}" class="btn small sec" onclick="routeCardDepotMove(${index},1)" ${!editorEnabled || index + 1 >= rows.length ? "disabled" : ""}>↓</button><button data-action="depot-delete-${index}" class="btn small danger" onclick="routeCardDepotRemove(${index})" ${disabled}>✕</button>` : ""}</div>
       ${state.depotErrors[index] ? `<div class="route-depot-error" role="alert">${esc(state.depotErrors[index])}</div>` : ""}
     </div>`;
   }).join("");
   return `${tabs}
-    <div class="route-card-toolbar route-depot-editor-controls"><div><b>${routeCardDepotDirectionLabel(state.depotDirection)}</b><div class="muted">Время указывается целыми секундами отдельно для дня и ночи.</div></div>${canEdit ? `<button class="btn sec" onclick="routeCardDepotAdd()" ${editorEnabled ? "" : "disabled"}>+ Остановка</button><button class="btn" onclick="routeCardSaveDepot()" ${editorEnabled ? "" : "disabled"}>${locked ? "Сохранение…" : "Сохранить"}</button>` : '<span class="badge b-mut">Только просмотр</span>'}</div>
+    <div class="route-card-toolbar route-depot-editor-controls"><div><b>${routeCardDepotDirectionLabel(state.depotDirection)}</b><div class="muted">Время указывается целыми секундами отдельно для дня и ночи.</div></div>${canEdit ? `<button data-action="depot-add" class="btn sec" onclick="routeCardDepotAdd()" ${editorEnabled ? "" : "disabled"}>+ Остановка</button><button data-action="depot-save" class="btn" onclick="routeCardSaveDepot()" ${editorEnabled ? "" : "disabled"}>${locked ? "Сохранение…" : "Сохранить"}</button>` : '<span class="badge b-mut">Только просмотр</span>'}</div>
     ${state.depotError ? `<div class="vio r"><b>Не удалось выполнить действие</b>${esc(state.depotError)}</div>` : ""}
     <div class="route-depot-grid">${content || '<div class="route-empty">Остановки нулевого рейса ещё не заданы. Пустой список можно сохранить, чтобы очистить направление.</div>'}</div>`;
 }
 function routeCardSegments(state) {
-  const rows = routeCardDraft(state).map((row, index) => `<tr><td>${index + 1}</td><td>${esc(row.stop.name)}${state.segmentErrors[index] ? `<div class="route-depot-error route-segment-error" role="alert">${esc(state.segmentErrors[index])}</div>` : ""}</td>
+  const errors = routeCardSegmentErrors(state);
+  const rows = routeCardDraft(state).map((row, index) => `<tr><td>${index + 1}</td><td>${esc(row.stop.name)}${errors[index] ? `<div class="route-depot-error route-segment-error" role="alert">${esc(errors[index])}</div>` : ""}</td>
     <td><input type="number" min="0" step="0.001" value="${index ? esc(row.distance_from_prev_km) : 0}" ${index ? "" : "disabled"} onchange="routeCardSegment(${index},'distance_from_prev_km',this.value)"></td>
     <td><input type="number" min="0" step="1" value="${esc(row.run_time_sec)}" onchange="routeCardSegment(${index},'run_time_sec',this.value)"></td>
     <td><input type="number" min="0" step="1" value="${esc(row.run_time_day_sec)}" onchange="routeCardSegment(${index},'run_time_day_sec',this.value)"></td>
@@ -527,7 +536,7 @@ function routeCardSegment(index, field, value) {
   if (!row) return;
   if (["run_time_day_sec", "run_time_night_sec"].includes(field)) row[field] = value;
   else row[field] = Math.max(0, +value || 0);
-  delete state.segmentErrors[index];
+  delete routeCardSegmentErrors(state)[index];
 }
 function routeMapPoints(state) {
   const plottedRows = routeCardDraft(state).map((row, index) => ({ row, sequence: index + 1 }))

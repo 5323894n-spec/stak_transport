@@ -23,6 +23,7 @@ HARNESS = ROOT / "tests" / "js" / "route_card_depot_behavior.js"
         "save_direction_race",
         "saving_locks_mutations",
         "main_runtime_validation",
+        "main_runtime_direction_errors",
         "document_modal_keyboard",
     ],
 )

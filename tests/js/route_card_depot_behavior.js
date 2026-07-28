@@ -244,7 +244,18 @@ async function savingLocksAllDepotMutations() {
   assert.equal(calls.filter(call => call.options?.method === "PUT").length, 1);
   assert.equal(state.depotDirection, "depot_out");
   assert.equal(JSON.stringify(state.depotDrafts.depot_out), before);
-  assert.match(vm.runInContext("routeCardDepot(window._routeCard)", context), /disabled/);
+  const html = vm.runInContext("routeCardDepot(window._routeCard)", context);
+  for (const action of [
+    "depot-direction-out", "depot-direction-in", "depot-stop-0",
+    "depot-distance-0", "depot-day-0", "depot-night-0", "depot-add",
+    "depot-save", "depot-delete-0", "depot-move-down-0", "depot-move-up-1",
+  ]) {
+    assert.match(
+      html,
+      new RegExp(`<[^>]+data-action="${action}"[^>]*disabled[^>]*>`),
+      `${action} must be disabled while saving`,
+    );
+  }
   put.resolve({});
   await pending;
   assert.ok(calls.some(call => call.url.includes("depot-stops?direction=depot_out")));
@@ -268,7 +279,7 @@ async function mainRouteRuntimeValidation() {
   assert.equal(state.drafts.forward[0].run_time_day_sec, "-1");
   await vm.runInContext("routeCardSaveTrace()", context);
   assert.equal(calls.filter(call => call.options?.method === "PUT").length, 0);
-  assert.ok(state.segmentErrors[0]);
+  assert.ok(state.segmentErrors.forward[0]);
   assert.match(vm.runInContext("routeCardSegments(window._routeCard)", context), /route-segment-error/);
   vm.runInContext('routeCardSegment(0, "run_time_day_sec", "31")', context);
   vm.runInContext('routeCardSegment(0, "run_time_night_sec", "41")', context);
@@ -279,6 +290,39 @@ async function mainRouteRuntimeValidation() {
   assert.equal(saved.options.body.items[0].run_time_night_sec, 41);
 }
 
+async function mainRuntimeErrorsArePerDirection() {
+  const calls = [];
+  const { context } = harness(async (url, options) => {
+    calls.push({ url, options });
+    return { items: [] };
+  });
+  const state = newState(context, 1);
+  const row = (stopId, day) => ({
+    stop_id: stopId, stop: { id: stopId, name: `Stop ${stopId}` },
+    distance_from_prev_km: 0, run_time_sec: 20,
+    run_time_day_sec: day, run_time_night_sec: "40", dwell_time_sec: 0,
+    distance_source: "manual", boarding_allowed: true,
+    alighting_allowed: true, is_timing_point: false,
+  });
+  state.tab = "segments";
+  state.drafts.forward = [row(10, "-1")];
+  state.drafts.backward = [row(20, "30")];
+
+  await vm.runInContext("routeCardSaveTrace()", context);
+  assert.ok(state.segmentErrors.forward[0]);
+  assert.equal(calls.filter(call => call.options?.method === "PUT").length, 0);
+
+  vm.runInContext('routeCardDirection("backward")', context);
+  assert.doesNotMatch(
+    vm.runInContext("routeCardSegments(window._routeCard)", context),
+    /route-segment-error/,
+  );
+  vm.runInContext('routeCardDirection("forward")', context);
+  assert.match(
+    vm.runInContext("routeCardSegments(window._routeCard)", context),
+    /route-segment-error/,
+  );
+}
 async function documentModalKeyboardAndFocus() {
   const documentStub = { activeElement: null, querySelector: () => null };
   const focusable = name => ({ name, focus() { documentStub.activeElement = this; } });
@@ -321,6 +365,7 @@ const scenarios = {
   save_direction_race: oldDirectionSaveCannotReloadNewDirection,
   saving_locks_mutations: savingLocksAllDepotMutations,
   main_runtime_validation: mainRouteRuntimeValidation,
+  main_runtime_direction_errors: mainRuntimeErrorsArePerDirection,
   document_modal_keyboard: documentModalKeyboardAndFocus,
 };
 
