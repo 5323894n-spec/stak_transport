@@ -111,7 +111,7 @@ def _route_sections(con, route_id):
     }
     network_rows = con.execute(
         """
-        SELECT rs.direction,rs.stop_id,rs.sequence,s.name AS stop_name,
+        SELECT rs.direction,rs.stop_id,rs.sequence,s.name AS name,
                s.external_code,s.address,s.latitude,s.longitude,
                rs.distance_from_prev_km,rs.cumulative_km,
                rs.run_time_day_sec,rs.run_time_night_sec,rs.dwell_time_sec,
@@ -126,7 +126,7 @@ def _route_sections(con, route_id):
     ).fetchall()
     depot_rows = con.execute(
         """
-        SELECT rds.direction,rds.stop_id,rds.sequence,s.name AS stop_name,
+        SELECT rds.direction,rds.stop_id,rds.sequence,s.name AS name,
                s.external_code,s.address,s.latitude,s.longitude,
                rds.distance_from_prev_km,
                rds.run_time_day_sec,rds.run_time_night_sec,rds.source

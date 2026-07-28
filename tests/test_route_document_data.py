@@ -40,14 +40,15 @@ def _seed_document(con):
     ).lastrowid
     stop_ids = [
         con.execute(
-            "INSERT INTO stops(name,address,latitude,longitude) VALUES(?,?,?,?)",
+            "INSERT INTO stops(name,external_code,address,latitude,longitude) "
+            "VALUES(?,?,?,?,?)",
             stop,
         ).lastrowid
         for stop in (
-            ("Вокзал", "Привокзальная площадь", 56.123, 35.987),
-            ("Площадь", None, None, None),
-            ("Аэропорт", "Аэропорт, 1", 56.456, 36.123),
-            ("Парк", "Гаражная, 5", 56.789, 36.456),
+            ("Вокзал", "STOP-1", "Привокзальная площадь", 56.123, 35.987),
+            ("Площадь", "STOP-2", None, None, None),
+            ("Аэропорт", "STOP-3", "Аэропорт, 1", 56.456, 36.123),
+            ("Парк", "DEPOT-1", "Гаражная, 5", 56.789, 36.456),
         )
     ]
     con.executemany(
@@ -118,6 +119,14 @@ def test_parse_document_options_winter():
     assert options.effective_date.isoformat() == "2025-12-01"
 
 
+def test_parse_document_options_summer():
+    options = parse_document_options("summer", "2025-06-01")
+
+    assert options.season_label == "ЛЕТНИЙ ПЕРИОД"
+    assert options.file_token == "ЛЕТО"
+    assert options.effective_date.isoformat() == "2025-06-01"
+
+
 @pytest.mark.parametrize(
     ("season", "effective_date"),
     [("autumn", "2025-12-01"), ("winter", "01.12.2025")],
@@ -131,7 +140,10 @@ def test_load_route_document_data_is_ordered_and_neutral(tmp_path):
     con = _open_db(tmp_path)
     try:
         route_id = _seed_document(con)
+        statements = []
+        con.set_trace_callback(statements.append)
         document = load_route_document_data(con, route_id)
+        con.set_trace_callback(None)
     finally:
         con.close()
 
@@ -145,16 +157,22 @@ def test_load_route_document_data_is_ordered_and_neutral(tmp_path):
         "Аэропорт",
         7,
     )
-    assert [row["stop_name"] for row in document.forward.stops] == [
+    assert len([
+        sql for sql in statements if sql.lstrip().upper().startswith("SELECT")
+    ]) == 4
+    assert [row["name"] for row in document.forward.stops] == [
         "Вокзал",
         "Площадь",
     ]
-    assert [row["stop_name"] for row in document.backward.stops] == ["Аэропорт"]
-    assert [row["stop_name"] for row in document.depot_out.stops] == [
+    assert [row["name"] for row in document.backward.stops] == ["Аэропорт"]
+    assert [row["name"] for row in document.depot_out.stops] == [
         "Парк",
         "Вокзал",
     ]
-    assert [row["stop_name"] for row in document.depot_in.stops] == ["Парк"]
+    assert [row["name"] for row in document.depot_in.stops] == ["Парк"]
+    assert all("stop_name" not in row for row in document.forward.stops)
+    assert document.forward.stops[0]["external_code"] == "STOP-1"
+    assert document.depot_out.stops[0]["external_code"] == "DEPOT-1"
     assert document.forward.stops[1]["run_time_day_sec"] == 180
     assert document.forward.stops[1]["run_time_night_sec"] == 210
     assert document.depot_out.stops[1]["distance_from_prev_km"] == 1.5
@@ -241,3 +259,10 @@ def test_xlsx_style_surface_smoke():
     response = _xlsx_download_response(workbook, "маршрут 42.xlsx")
     assert response.media_type.endswith("spreadsheetml.sheet")
     assert "filename*=UTF-8''" in response.headers["content-disposition"]
+    assert "%D0%BC%D0%B0%D1%80%D1%88%D1%80%D1%83%D1%82%2042.xlsx" in (
+        response.headers["content-disposition"]
+    )
+
+    portrait_sheet = workbook.create_sheet("Portrait")
+    apply_sheet_setup(portrait_sheet, landscape=False)
+    assert portrait_sheet.page_setup.orientation == "portrait"
