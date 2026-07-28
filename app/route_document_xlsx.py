@@ -116,6 +116,11 @@ def _visible_route_number(route_number):
     return str(route_number or "").strip() or "БЕЗ НОМЕРА"
 
 
+def _excel_header_text(value):
+    """Escape Excel header/footer control characters in visible text."""
+    return str(value).replace("&", "&&")
+
+
 def schedule_filename(data, options):
     return f"Расписание_{_route_token(data.route_number)}_{options.effective_date:%Y%m%d}_{options.file_token}.xlsx"
 
@@ -161,7 +166,8 @@ def _section_runtime(section):
 
 
 def _document_header(ws, data):
-    ws.oddHeader.left.text = f"Маршрут {_visible_route_number(data.route_number)}"
+    route_number = _excel_header_text(_visible_route_number(data.route_number))
+    ws.oddHeader.left.text = f"Маршрут {route_number}"
     ws.oddHeader.right.text = f"Версия {data.version}"
     ws.oddFooter.left.text = f"Сформировано {datetime.date.today():%d.%m.%Y} · версия {data.version}"
     ws.oddFooter.center.text = "Страница &P из &N"
@@ -390,7 +396,7 @@ def _wrapped_text_row_height(name, address):
     """Estimate a bounded row height for wrapped stop name and address."""
     name_lines = max(1, math.ceil(len(str(name or "")) / 34))
     address_lines = max(1, math.ceil(len(str(address or "")) / 34))
-    return min(96, max(24, max(name_lines, address_lines) * 15))
+    return min(240, max(24, max(name_lines, address_lines) * 15))
 
 
 def write_route_section_table(ws, row, section, *, empty_message=None):

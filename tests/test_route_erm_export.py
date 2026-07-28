@@ -221,6 +221,24 @@ def test_erm_auth_validation_unknown_route_and_filename_normalization(tmp_path):
         assert sheet["A2"].value.startswith("Маршрут: M1/A —")
         assert sheet.oddHeader.left.text == "Маршрут M1/A"
 
+    con = db.connect()
+    try:
+        con.execute(
+            "UPDATE routes SET number=? WHERE id=?",
+            ("A&B", route_id),
+        )
+        con.commit()
+    finally:
+        con.close()
+    ampersand_response = _download(client, route_id)
+    assert "ЭРМ_МA_B_20260601_ЛЕТО.xlsx" in unquote(
+        ampersand_response.headers["content-disposition"]
+    )
+    ampersand_workbook = _workbook(ampersand_response)
+    for sheet in ampersand_workbook.worksheets:
+        assert sheet["A2"].value.startswith("Маршрут: A&B —")
+        assert sheet.oddHeader.left.text == "Маршрут A&&B"
+
     from app.route_document_data import parse_document_options
     from app.route_document_xlsx import erm_filename
 
@@ -273,7 +291,7 @@ def test_erm_formula_like_text_long_values_and_no_error_literals(tmp_path):
         )
     ]
     assert len(rendered) >= 3 and all(cell.data_type == "s" for cell in rendered)
-    assert 24 < parameters.row_dimensions[7].height <= 96
+    assert 210 < parameters.row_dimensions[7].height <= 240
     formulas = [
         cell.value
         for sheet in workbook.worksheets
