@@ -133,18 +133,34 @@ function routeCardDocumentKeydown(event) {
     event.preventDefault(); first.focus();
   }
 }
+function routeCardDocumentDownload() {
+  const state = window._routeCard;
+  if (!state.documentDate) {
+    toast("Укажите дату начала действия", true);
+    return;
+  }
+  const endpoint = state.documentType === "erm"
+    ? "erm-export.xlsx" : "schedule-document.xlsx";
+  const params = new URLSearchParams({
+    season: state.documentSeason,
+    effective_date: state.documentDate,
+  });
+  openWin(`/api/routes/${state.routeId}/${endpoint}?${params.toString()}`);
+  routeCardCloseDocumentDialog();
+}
+
 function routeCardDocumentDialog(state) {
   if (!state.documentDialogOpen) return "";
   return `<div class="modal-bg route-document-dialog-bg" role="presentation">
     <div class="modal route-document-dialog" role="dialog" aria-modal="true" aria-labelledby="route-document-title" onkeydown="routeCardDocumentKeydown(event)">
       <h3 id="route-document-title">Экспорт документов</h3>
-      <p class="muted">Параметры уже можно проверить. Формирование файлов будет подключено на следующем этапе.</p>
+      <p class="muted">Выберите документ, сезон и дату начала действия.</p>
       <div class="route-document-fields">
-        <label>Документ<select onchange="window._routeCard.documentType=this.value"><option value="schedule" ${state.documentType === "schedule" ? "selected" : ""}>Расписание</option><option value="erm" ${state.documentType === "erm" ? "selected" : ""}>ЭРМ</option></select></label>
-        <label>Сезон<select onchange="window._routeCard.documentSeason=this.value"><option value="winter" ${state.documentSeason === "winter" ? "selected" : ""}>Зима</option><option value="summer" ${state.documentSeason === "summer" ? "selected" : ""}>Лето</option></select></label>
-        <label>Дата начала действия<input type="date" value="${esc(state.documentDate)}" onchange="window._routeCard.documentDate=this.value"></label>
+        <label for="route-document-kind">Документ<select id="route-document-kind" onchange="window._routeCard.documentType=this.value"><option value="schedule" ${state.documentType === "schedule" ? "selected" : ""}>Расписание</option><option value="erm" ${state.documentType === "erm" ? "selected" : ""}>ЭРМ</option></select></label>
+        <label for="route-document-season">Сезон<select id="route-document-season" onchange="window._routeCard.documentSeason=this.value"><option value="winter" ${state.documentSeason === "winter" ? "selected" : ""}>Зима</option><option value="summer" ${state.documentSeason === "summer" ? "selected" : ""}>Лето</option></select></label>
+        <label for="route-document-date">Дата начала действия<input id="route-document-date" type="date" value="${esc(state.documentDate)}" onchange="window._routeCard.documentDate=this.value"></label>
       </div>
-      <div class="foot"><button class="btn sec" onclick="routeCardCloseDocumentDialog()">Закрыть</button><button class="btn" disabled title="Будет доступно после подключения формирования документов">Сформировать</button></div>
+      <div class="foot"><button class="btn sec" onclick="routeCardCloseDocumentDialog()">Отмена</button><button class="btn" onclick="routeCardDocumentDownload()">Сформировать</button></div>
     </div></div>`;
 }
 

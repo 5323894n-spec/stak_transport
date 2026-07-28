@@ -94,9 +94,25 @@ def test_depot_editor_styles_are_responsive_and_print_safe():
 def test_route_document_asset_versions_are_bumped_without_leaflet_reordering():
     index = _source("index.html")
 
-    assert "styles.css?v=3.2&amp;route=3.8" in index
-    assert "app.js?v=3.2&amp;route=3.8" in index
-    assert "route-card.js?v=3.7" in index
+    assert "styles.css?v=3.2&amp;route=3.9" in index
+    assert "app.js?v=3.2&amp;route=3.9" in index
+    assert "route-card.js?v=3.8" in index
     assert index.index("/static/vendor/leaflet/leaflet.js") < index.index(
         "/static/route-card.js"
     )
+
+
+def test_route_document_dialog_download_contract():
+    source = _source("route-card.js")
+
+    assert "function routeCardDocumentDownload" in source
+    assert "schedule-document.xlsx" in source
+    assert "erm-export.xlsx" in source
+    assert "Укажите дату начала действия" in source
+    assert "new URLSearchParams" in source
+    assert "effective_date" in source
+    assert "openWin" in source
+    assert 'id="route-document-kind"' in source
+    assert 'id="route-document-season"' in source
+    assert 'id="route-document-date"' in source
+    assert 'onclick="routeCardDocumentDownload()"' in source
