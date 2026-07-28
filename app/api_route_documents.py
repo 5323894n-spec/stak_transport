@@ -16,7 +16,9 @@ from .route_depot import (
 from .route_document_data import load_route_document_data, parse_document_options
 from .route_document_xlsx import (
     _xlsx_download_response,
+    build_erm_workbook,
     build_schedule_workbook,
+    erm_filename,
     schedule_filename,
 )
 
@@ -105,5 +107,30 @@ def route_schedule_document(
             raise HTTPException(status, str(exc)) from exc
         workbook = build_schedule_workbook(data, options)
         return _xlsx_download_response(workbook, schedule_filename(data, options))
+    finally:
+        con.close()
+
+
+
+@router.get("/routes/{route_id}/erm-export.xlsx")
+def route_erm_export(
+    route_id: int,
+    season: str,
+    effective_date: str,
+    user=Depends(current_user),
+):
+    try:
+        options = parse_document_options(season, effective_date)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    con = db.connect()
+    try:
+        try:
+            data = load_route_document_data(con, route_id)
+        except ValueError as exc:
+            status = 404 if str(exc) == "Маршрут не найден" else 400
+            raise HTTPException(status, str(exc)) from exc
+        workbook = build_erm_workbook(data, options)
+        return _xlsx_download_response(workbook, erm_filename(data, options))
     finally:
         con.close()

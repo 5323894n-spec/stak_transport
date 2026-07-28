@@ -337,6 +337,165 @@ def build_schedule_workbook(data, options):
     return workbook
 
 
+
+ERM_HEADERS = (
+    "№", "ID", "Остановочный пункт", "Улица", "Широта", "Долгота",
+    "День между ОП", "День нарастающим", "Ночь между ОП",
+    "Ночь нарастающим", "Расстояние между ОП", "Расстояние нарастающим",
+)
+
+
+def erm_filename(data, options):
+    return (
+        f"ЭРМ_{_route_token(data.route_number)}_"
+        f"{options.effective_date:%Y%m%d}_{options.file_token}.xlsx"
+    )
+
+
+def _erm_sheet_header(ws, data, options, section_label):
+    apply_sheet_setup(ws)
+    _document_header(ws, data)
+    write_title_band(
+        ws, 1, "ЭЛЕКТРОННАЯ МОДЕЛЬ МАРШРУТА", end_col=len(ERM_HEADERS)
+    )
+    ws.cell(
+        2, 1,
+        _safe_text(
+            f"Маршрут: {_route_token(data.route_number)} — {data.route_name}"
+        ),
+    )
+    ws.merge_cells(start_row=2, start_column=1, end_row=2, end_column=len(ERM_HEADERS))
+    ws.cell(
+        3, 1,
+        _safe_text(
+            f"{options.season_label} · действует с "
+            f"{options.effective_date:%d.%m.%Y}"
+        ),
+    )
+    ws.merge_cells(start_row=3, start_column=1, end_row=3, end_column=len(ERM_HEADERS))
+    for row in (2, 3):
+        ws.cell(row, 1).alignment = Alignment(vertical="center", wrap_text=True)
+    write_section_header(ws, 4, section_label, end_col=len(ERM_HEADERS))
+    write_table_header(ws, 5, ERM_HEADERS)
+    return 6
+
+
+def write_route_section_table(ws, row, section, *, empty_message=None):
+    """Write one ERM direction and return the first row after the section."""
+    first_data_row = row
+    if not section.stops:
+        ws.merge_cells(
+            start_row=row, start_column=1, end_row=row, end_column=len(ERM_HEADERS)
+        )
+        apply_warning_cell(
+            ws.cell(row, 1, empty_message or "Данные маршрута не заполнены")
+        )
+        return row + 1
+
+    has_missing_technical_data = False
+    for sequence, stop in enumerate(section.stops, start=1):
+        external_code = str(stop.get("external_code") or "").strip()
+        latitude = stop.get("latitude")
+        longitude = stop.get("longitude")
+        values = (
+            sequence,
+            _safe_text(external_code) if external_code else None,
+            _safe_text(str(stop.get("name") or "")),
+            _safe_text(str(stop.get("address") or "")) if stop.get("address") else None,
+            float(latitude) if latitude is not None else None,
+            float(longitude) if longitude is not None else None,
+        )
+        for column, value in enumerate(values, start=1):
+            ws.cell(row, column, value)
+        write_excel_time(
+            ws.cell(row, 7), int(stop.get("run_time_day_sec") or 0)
+        )
+        ws.cell(row, 8, f"=SUM($G${first_data_row}:G{row})").number_format = "[h]:mm"
+        write_excel_time(
+            ws.cell(row, 9), int(stop.get("run_time_night_sec") or 0)
+        )
+        ws.cell(row, 10, f"=SUM($I${first_data_row}:I{row})").number_format = "[h]:mm"
+        ws.cell(row, 11, float(stop.get("distance_from_prev_km") or 0))
+        ws.cell(row, 11).number_format = "0.000"
+        ws.cell(row, 12, f"=SUM($K${first_data_row}:K{row})").number_format = "0.000"
+        for column in range(1, len(ERM_HEADERS) + 1):
+            _style_cell(ws.cell(row, column), center=column not in (3, 4))
+        missing_columns = []
+        if not external_code:
+            missing_columns.append(2)
+        if latitude is None:
+            missing_columns.append(5)
+        if longitude is None:
+            missing_columns.append(6)
+        for column in missing_columns:
+            apply_warning_cell(ws.cell(row, column))
+        has_missing_technical_data = has_missing_technical_data or bool(missing_columns)
+        row += 1
+
+    if has_missing_technical_data:
+        ws.merge_cells(
+            start_row=row, start_column=1, end_row=row, end_column=len(ERM_HEADERS)
+        )
+        apply_warning_cell(
+            ws.cell(row, 1, "Примечание: отсутствуют технические данные")
+        )
+        row += 1
+    return row
+
+
+def _finalize_erm_sheet(ws, data, last_row):
+    _visible_footer(ws, last_row + 1, len(ERM_HEADERS), data)
+    ws.freeze_panes = "A6"
+    ws.print_title_rows = "1:5"
+    set_print_area(ws, max_row=last_row + 1, max_col=len(ERM_HEADERS))
+    widths = (6, 18, 34, 34, 13, 13, 17, 17, 17, 17, 20, 20)
+    for index, width in enumerate(widths, start=1):
+        ws.column_dimensions[get_column_letter(index)].width = width
+    for row in range(1, last_row + 2):
+        ws.row_dimensions[row].height = 38 if row == 5 else 24
+    ws.row_dimensions[2].height = min(
+        96, 30 + len(data.route_name) // 35 * 12
+    )
+
+
+def _write_erm_single_section_sheet(ws, data, options, section, label):
+    row = _erm_sheet_header(ws, data, options, label)
+    row = write_route_section_table(
+        ws, row, section, empty_message="Нулевой рейс не заполнен"
+    )
+    _finalize_erm_sheet(ws, data, row)
+
+
+def build_erm_workbook(data, options):
+    workbook = Workbook()
+    parameters = workbook.active
+    parameters.title = "Параметры"
+    row = _erm_sheet_header(
+        parameters, data, options, _SECTION_LABELS["forward"]
+    )
+    row = write_route_section_table(parameters, row, data.forward)
+    row += 1
+    write_section_header(
+        parameters, row, _SECTION_LABELS["backward"], end_col=len(ERM_HEADERS)
+    )
+    row += 1
+    write_table_header(parameters, row, ERM_HEADERS)
+    row += 1
+    row = write_route_section_table(parameters, row, data.backward)
+    _finalize_erm_sheet(parameters, data, row)
+
+    _write_erm_single_section_sheet(
+        workbook.create_sheet("Из парка"),
+        data, options, data.depot_out, _SECTION_LABELS["depot_out"],
+    )
+    _write_erm_single_section_sheet(
+        workbook.create_sheet("В парк"),
+        data, options, data.depot_in, _SECTION_LABELS["depot_in"],
+    )
+    workbook.calculation.fullCalcOnLoad = True
+    workbook.calculation.forceFullCalc = True
+    return workbook
+
 def _xlsx_download_response(workbook, filename):
     stream = BytesIO(); workbook.save(stream); stream.seek(0)
     safe_filename = str(filename).replace("\r", "").replace("\n", "")
