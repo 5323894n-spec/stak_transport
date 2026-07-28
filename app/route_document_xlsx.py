@@ -8,6 +8,7 @@ from urllib.parse import quote
 
 from fastapi.responses import StreamingResponse
 from openpyxl import Workbook
+from openpyxl.comments import Comment
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
@@ -101,7 +102,8 @@ def set_print_area(ws, *, min_row=1, min_col=1, max_row=None, max_col=None):
 
 def _route_token(route_number):
     value = str(route_number or "").strip()
-    numeric = re.fullmatch(r"[MМmм]?(\d+)", value)
+    value = re.sub(r"^[MМmм](?=\d)", "", value, count=1)
+    numeric = re.fullmatch(r"(\d+)", value)
     if numeric:
         return f"М{int(numeric.group(1)):03d}"
     safe = re.sub(r"[^0-9A-Za-zА-Яа-яЁё]+", "_", value).strip("_")
@@ -166,15 +168,31 @@ def _visible_footer(ws, row, max_col, data):
     ws.cell(row, 1).alignment = Alignment(horizontal="right")
 
 
+def _trip_terminals(direction, start_point, end_point):
+    normalized = str(direction or "").strip().lower()
+    if normalized in {"backward", "back", "reverse", "обратное"}:
+        return end_point, start_point
+    return start_point, end_point
+
+
 def _write_day_sheet(ws, data, options, outer_key, day_label):
     outputs = _flatten(data.schedules.get(outer_key, {}))
     variants = {variant for variant, _ in outputs}
     max_trips = max((len(output.trips) for _, output in outputs), default=1)
-    terminals = f"{data.start_point} / {data.end_point}"
     headers = ["Выход / тип дня", "Из парка"]
     for index in range(1, max_trips + 1):
-        headers.extend((f"Рейс {index}\nотправление ({terminals})",
-                        f"Рейс {index}\nприбытие ({terminals})"))
+        representative = next(
+            (output.trips[index - 1] for _, output in outputs
+             if len(output.trips) >= index),
+            None,
+        )
+        departure, arrival = _trip_terminals(
+            representative.direction if representative else None,
+            data.start_point,
+            data.end_point,
+        )
+        headers.extend((f"Рейс {index}\nотправление ({departure})",
+                        f"Рейс {index}\nприбытие ({arrival})"))
     headers.extend(("В парк", "Перерывы", "Всего", "Пробег, км"))
     visible_max = max(len(headers), 10)
     helper_start = visible_max + 2
@@ -219,9 +237,14 @@ def _write_day_sheet(ws, data, options, outer_key, day_label):
             _style_cell(ws.cell(row, 2))
             for index, trip in enumerate(output.trips):
                 column = 3 + index * 2
-                write_excel_time(ws.cell(row, column), trip.departure_sec)
-                write_excel_time(ws.cell(row, column + 1), trip.arrival_sec)
-                _style_cell(ws.cell(row, column)); _style_cell(ws.cell(row, column + 1))
+                departure_cell = write_excel_time(ws.cell(row, column), trip.departure_sec)
+                arrival_cell = write_excel_time(ws.cell(row, column + 1), trip.arrival_sec)
+                departure, arrival = _trip_terminals(
+                    trip.direction, data.start_point, data.end_point
+                )
+                departure_cell.comment = Comment(f"Отправление: {departure}", "ATP")
+                arrival_cell.comment = Comment(f"Прибытие: {arrival}", "ATP")
+                _style_cell(departure_cell); _style_cell(arrival_cell)
             for column in range(3 + len(output.trips) * 2, 3 + max_trips * 2):
                 _style_cell(ws.cell(row, column))
             depot_in_col = 3 + max_trips * 2

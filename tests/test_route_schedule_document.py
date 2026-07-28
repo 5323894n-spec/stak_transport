@@ -70,7 +70,10 @@ def test_schedule_document_endpoint_contract(tmp_path):
     assert any(isinstance(value, str) and value.startswith("=") for value in values)
     kpis = ("Количество выходов","Количество рейсов","Общий пробег, км","Сумма перерывов","Продолжительность работы")
     assert all(label in values for label in kpis) and all(label in values for label in ("Из парка","В парк","Перерывы","Всего"))
-    assert any(isinstance(value,str) and "Вокзал / Аэропорт" in value for value in values)
+    assert sheet["C8"].value == "Рейс 1\nотправление (Вокзал)"
+    assert sheet["D8"].value == "Рейс 1\nприбытие (Аэропорт)"
+    assert sheet["E8"].value == "Рейс 2\nотправление (Аэропорт)"
+    assert sheet["F8"].value == "Рейс 2\nприбытие (Вокзал)"
     assert any(isinstance(value,str) and "Версия 7" in value for value in values)
     _,_,print_max_col,_ = range_boundaries(str(sheet.print_area).split("!")[-1].replace("'","").replace("$",""))
     assert all(next(cell.column for row in sheet.iter_rows() for cell in row if cell.value == label) <= print_max_col for label in kpis)
@@ -87,6 +90,8 @@ def test_schedule_filename_normalizes_existing_route_prefixes():
     options = parse_document_options("winter", "2025-12-01")
     assert schedule_filename(SimpleNamespace(route_number="M1"), options).startswith("Расписание_М001_")
     assert schedule_filename(SimpleNamespace(route_number="М044"), options).startswith("Расписание_М044_")
+    assert schedule_filename(SimpleNamespace(route_number="M44/A"), options).startswith("Расписание_М44_A_")
+    assert schedule_filename(SimpleNamespace(route_number="М44-А"), options).startswith("Расписание_М44_А_")
 
 
 def test_schedule_document_auth_validation_and_unknown_route(tmp_path):
