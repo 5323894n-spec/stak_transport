@@ -33,7 +33,7 @@ class RouteSection:
 @dataclass(frozen=True)
 class ScheduleTrip:
     output_number: int
-    shift_number: int
+    shift_number: int | None
     trip_number: int | None
     direction: str
     departure_sec: int | None
@@ -62,7 +62,7 @@ class RouteDocumentData:
     backward: RouteSection
     depot_out: RouteSection
     depot_in: RouteSection
-    schedules: dict[str, tuple[ScheduleOutput, ...]]
+    schedules: dict[str, dict[str, tuple[ScheduleOutput, ...]]]
 
 
 def parse_document_options(season, effective_date):
@@ -168,6 +168,75 @@ def _route_sections(con, route_id):
     }
 
 
+def _business_sequence(row):
+    """Stable route-planning sequence used only to select the service-day anchor."""
+    trip_number = row["trip_number"]
+    shift_number = row["shift_number"]
+    return (
+        trip_number is None,
+        int(trip_number) if trip_number is not None else 0,
+        shift_number is None,
+        int(shift_number) if shift_number is not None else 0,
+        int(row["id"]),
+    )
+
+
+def _chronological_rows(rows):
+    """Order trips on a service-day axis without an arbitrary clock cutoff.
+
+    The business anchor is the lowest non-null trip number, then shift/id. Times
+    earlier than its departure belong to the following calendar day. Missing
+    departures sort last. If the anchor has no departure, the first stable row
+    that has one supplies the anchor.
+    """
+    business_rows = sorted(rows, key=_business_sequence)
+    anchor_row = next(
+        (row for row in business_rows if row["trip_number"] is not None),
+        business_rows[0],
+    )
+    anchor_sec = _clock_seconds(anchor_row["dep_time"])
+    if anchor_sec is None:
+        anchor_sec = next(
+            (
+                departure
+                for row in business_rows
+                if (departure := _clock_seconds(row["dep_time"])) is not None
+            ),
+            None,
+        )
+
+    def chronology_key(row):
+        departure = _clock_seconds(row["dep_time"])
+        if departure is None:
+            return (1, 0, *_business_sequence(row))
+        normalized = (
+            departure + 86400
+            if anchor_sec is not None and departure < anchor_sec
+            else departure
+        )
+        return (0, normalized, *_business_sequence(row))
+
+    return sorted(rows, key=chronology_key)
+
+
+def _schedule_trip(row):
+    return ScheduleTrip(
+        output_number=int(row["output_number"] or 0),
+        shift_number=(
+            int(row["shift_number"]) if row["shift_number"] is not None else None
+        ),
+        trip_number=(
+            int(row["trip_number"]) if row["trip_number"] is not None else None
+        ),
+        direction=str(row["direction"] or ""),
+        departure_sec=_clock_seconds(row["dep_time"]),
+        arrival_sec=_clock_seconds(row["arr_time"]),
+        distance_km=float(row["distance_km"] or 0),
+        break_after_sec=int(row["break_after_min"] or 0) * 60,
+        break_type=str(row["break_type"] or ""),
+    )
+
+
 def _route_schedules(con, route_id):
     rows = con.execute(
         """
@@ -183,50 +252,39 @@ def _route_schedules(con, route_id):
                    WHEN 'суббота' THEN 4 WHEN 'воскресенье' THEN 5
                    ELSE 6
                  END,
-                 output_number,shift_number,trip_number,dep_time,id
+                 output_number,id
         """,
         (route_id,),
     ).fetchall()
-    grouped = {key: {} for key, _ in _DAY_TYPES}
     aliases = {
         database_value: key
         for key, database_values in _DAY_TYPES
         for database_value in database_values
     }
-    for row in rows:
-        item = dict(row)
-        key = aliases[item["day_type"]]
-        output_number = int(item["output_number"] or 0)
-        trip = ScheduleTrip(
-            output_number=output_number,
-            shift_number=int(item["shift_number"] or 0),
-            trip_number=(
-                int(item["trip_number"]) if item["trip_number"] is not None else None
-            ),
-            direction=str(item["direction"] or ""),
-            departure_sec=_clock_seconds(item["dep_time"]),
-            arrival_sec=_clock_seconds(item["arr_time"]),
-            distance_km=float(item["distance_km"] or 0),
-            break_after_sec=int(item["break_after_min"] or 0) * 60,
-            break_type=str(item["break_type"] or ""),
-        )
-        output_key = (item["day_type"], output_number)
-        output = grouped[key].setdefault(
-            output_key, {"day_type": item["day_type"], "trips": []}
-        )
-        output["trips"].append(trip)
-    return {
-        key: tuple(
-            ScheduleOutput(
-                day_type=values["day_type"],
-                output_number=output_number,
-                trips=tuple(values["trips"]),
-            )
-            for (_, output_number), values in outputs.items()
-        )
-        for key, outputs in grouped.items()
-    }
+    grouped = {key: {} for key, _ in _DAY_TYPES}
+    for source_row in rows:
+        row = dict(source_row)
+        outer_key = aliases[row["day_type"]]
+        variant_outputs = grouped[outer_key].setdefault(row["day_type"], {})
+        variant_outputs.setdefault(int(row["output_number"] or 0), []).append(row)
 
+    return {
+        outer_key: {
+            variant: tuple(
+                ScheduleOutput(
+                    day_type=variant,
+                    output_number=output_number,
+                    trips=tuple(
+                        _schedule_trip(row)
+                        for row in _chronological_rows(output_rows)
+                    ),
+                )
+                for output_number, output_rows in sorted(outputs.items())
+            )
+            for variant, outputs in variants.items()
+        }
+        for outer_key, variants in grouped.items()
+    }
 
 def load_route_document_data(con, route_id):
     """Load one route in a bounded set of deterministic SQL queries."""

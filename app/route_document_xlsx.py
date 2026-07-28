@@ -107,7 +107,7 @@ def _xlsx_download_response(workbook, filename):
     workbook.save(stream)
     stream.seek(0)
     safe_filename = str(filename).replace("\r", "").replace("\n", "")
-    encoded_name = quote(safe_filename)
+    encoded_name = quote(safe_filename, safe="")
     return StreamingResponse(
         stream,
         media_type=(

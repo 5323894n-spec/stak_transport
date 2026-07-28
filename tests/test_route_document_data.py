@@ -1,10 +1,15 @@
 # -*- coding: utf-8 -*-
 from dataclasses import fields, is_dataclass
+from typing import get_type_hints
 
 import pytest
 from openpyxl import Workbook
 
-from app.route_document_data import load_route_document_data, parse_document_options
+from app.route_document_data import (
+    ScheduleTrip,
+    load_route_document_data,
+    parse_document_options,
+)
 from app.route_document_xlsx import (
     BLUE,
     NAVY,
@@ -89,8 +94,16 @@ def _seed_document(con):
             (route_id, "будни", 1, 1, 2, "обратное", "07:00", "07:35", 9.5),
             (route_id, "будни", 1, 1, 1, "прямое", "06:00", "06:35", 9.5),
             (route_id, "выходные", 1, 1, 1, "прямое", "09:00", "09:35", 9.5),
+            (route_id, "workday", 1, 1, 1, "прямое", "12:00", "12:35", 9.5),
+            (route_id, "weekend", 1, 1, 1, "прямое", "13:00", "13:35", 9.5),
             (route_id, "воскресенье", 1, 1, 1, "прямое", "11:00", "11:35", 9.5),
             (route_id, "суббота", 1, 1, 1, "прямое", "10:00", "10:35", 9.5),
+            (route_id, "будни", 3, 2, None, "прямое", "08:00", "08:30", 9.5),
+            (route_id, "будни", 3, None, 1, "прямое", "07:00", "07:30", 9.5),
+            (route_id, "будни", 3, 1, 1, "прямое", "06:00", "06:30", 9.5),
+            (route_id, "будни", 4, 1, 3, "прямое", "02:00", "02:30", 9.5),
+            (route_id, "будни", 4, 1, 1, "прямое", "22:00", "22:30", 9.5),
+            (route_id, "будни", 4, 1, 2, "прямое", "00:30", "01:00", 9.5),
         ],
     )
     con.commit()
@@ -186,25 +199,52 @@ def test_load_route_document_data_is_ordered_and_neutral(tmp_path):
     assert isinstance(document.depot_in.stops[0]["latitude"], float)
 
     assert list(document.schedules) == ["workday", "weekend"]
-    assert [output.output_number for output in document.schedules["workday"]] == [1, 2]
-    assert [trip.trip_number for trip in document.schedules["workday"][0].trips] == [1, 2]
-    assert document.schedules["workday"][0].trips[0].departure_sec == 6 * 3600
-    assert [output.day_type for output in document.schedules["weekend"]] == [
-        "выходные",
-        "суббота",
-        "воскресенье",
+    assert list(document.schedules["workday"]) == ["будни", "workday"]
+    assert list(document.schedules["weekend"]) == [
+        "выходные", "weekend", "суббота", "воскресенье",
     ]
-    assert all(
-        output.output_number == 1 for output in document.schedules["weekend"]
-    )
-    assert document.schedules["weekend"][0].trips[0].arrival_sec == 9 * 3600 + 35 * 60
-    assert document.schedules["weekend"][1].trips[0].departure_sec == 10 * 3600
-    assert document.schedules["weekend"][2].trips[0].departure_sec == 11 * 3600
+    workday_outputs = document.schedules["workday"]["будни"]
+    assert [output.output_number for output in workday_outputs] == [1, 2, 3, 4]
+    assert [trip.trip_number for trip in workday_outputs[0].trips] == [1, 2]
+    assert workday_outputs[0].trips[0].departure_sec == 6 * 3600
+
+    for variant in document.schedules["weekend"].values():
+        assert [output.output_number for output in variant] == [1]
+    assert document.schedules["weekend"]["выходные"][0].trips[0].arrival_sec == 9 * 3600 + 35 * 60
+    assert document.schedules["weekend"]["суббота"][0].trips[0].departure_sec == 10 * 3600
+    assert document.schedules["weekend"]["воскресенье"][0].trips[0].departure_sec == 11 * 3600
 
     assert all(
         not type(value).__module__.startswith("openpyxl")
         for value in _walk(document)
     )
+
+
+def test_schedule_trips_are_ordered_on_service_day_axis(tmp_path):
+    con = _open_db(tmp_path)
+    try:
+        route_id = _seed_document(con)
+        outputs = load_route_document_data(
+            con, route_id
+        ).schedules["workday"]["будни"]
+    finally:
+        con.close()
+
+    mismatched = outputs[2].trips
+    assert [trip.departure_sec for trip in mismatched] == [
+        6 * 3600, 7 * 3600, 8 * 3600,
+    ]
+    assert [trip.trip_number for trip in mismatched] == [1, 1, None]
+    assert mismatched[1].shift_number is None
+
+    overnight = outputs[3].trips
+    assert [trip.departure_sec for trip in overnight] == [
+        22 * 3600, 30 * 60, 2 * 3600,
+    ]
+
+
+def test_schedule_trip_declares_nullable_shift_number():
+    assert get_type_hints(ScheduleTrip)["shift_number"] == int | None
 
 
 def test_load_route_document_data_rejects_unknown_route(tmp_path):
@@ -256,10 +296,10 @@ def test_xlsx_style_surface_smoke():
     set_print_area(sheet, min_row=1, min_col=1, max_row=4, max_col=4)
     assert sheet.print_area == "'Sheet'!$A$1:$D$4"
 
-    response = _xlsx_download_response(workbook, "маршрут 42.xlsx")
+    response = _xlsx_download_response(workbook, "маршрут/42.xlsx")
     assert response.media_type.endswith("spreadsheetml.sheet")
     assert "filename*=UTF-8''" in response.headers["content-disposition"]
-    assert "%D0%BC%D0%B0%D1%80%D1%88%D1%80%D1%83%D1%82%2042.xlsx" in (
+    assert "%D0%BC%D0%B0%D1%80%D1%88%D1%80%D1%83%D1%82%2F42.xlsx" in (
         response.headers["content-disposition"]
     )
 
