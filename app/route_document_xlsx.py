@@ -3,6 +3,7 @@
 
 import datetime
 from io import BytesIO
+import math
 import re
 from urllib.parse import quote
 
@@ -110,6 +111,11 @@ def _route_token(route_number):
     return f"М{safe or 'БЕЗ_НОМЕРА'}"
 
 
+def _visible_route_number(route_number):
+    """Preserve the trimmed source route number inside the workbook."""
+    return str(route_number or "").strip() or "БЕЗ НОМЕРА"
+
+
 def schedule_filename(data, options):
     return f"Расписание_{_route_token(data.route_number)}_{options.effective_date:%Y%m%d}_{options.file_token}.xlsx"
 
@@ -155,7 +161,7 @@ def _section_runtime(section):
 
 
 def _document_header(ws, data):
-    ws.oddHeader.left.text = f"Маршрут {_route_token(data.route_number)}"
+    ws.oddHeader.left.text = f"Маршрут {_visible_route_number(data.route_number)}"
     ws.oddHeader.right.text = f"Версия {data.version}"
     ws.oddFooter.left.text = f"Сформировано {datetime.date.today():%d.%m.%Y} · версия {data.version}"
     ws.oddFooter.center.text = "Страница &P из &N"
@@ -199,7 +205,7 @@ def _write_day_sheet(ws, data, options, outer_key, day_label):
     apply_sheet_setup(ws)
     _document_header(ws, data)
     write_title_band(ws, 1, "МАРШРУТНОЕ РАСПИСАНИЕ", end_col=visible_max)
-    ws.cell(2, 1, f"Маршрут: {_route_token(data.route_number)} — {data.route_name}")
+    ws.cell(2, 1, f"Маршрут: {_visible_route_number(data.route_number)} — {data.route_name}")
     ws.merge_cells(start_row=2, start_column=1, end_row=2, end_column=visible_max)
     ws.cell(3, 1, _safe_text(f"{data.start_point} — {data.end_point} · {options.season_label} · действует с {options.effective_date:%d.%m.%Y}"))
     ws.merge_cells(start_row=3, start_column=1, end_row=3, end_column=visible_max)
@@ -292,7 +298,7 @@ def _write_chronometry_sheet(ws, data, options):
                "Накоплено день", "Накоплено ночь", "Накоплено, км", "Примечание")
     visible_max = len(headers)
     write_title_band(ws, 1, "ХРОНОМЕТРАЖ МАРШРУТА", end_col=visible_max)
-    ws.cell(2, 1, f"Маршрут: {_route_token(data.route_number)} — {data.route_name}")
+    ws.cell(2, 1, f"Маршрут: {_visible_route_number(data.route_number)} — {data.route_name}")
     ws.merge_cells(start_row=2, start_column=1, end_row=2, end_column=visible_max)
     ws.cell(3, 1, f"{options.season_label} · действует с {options.effective_date:%d.%m.%Y}")
     ws.merge_cells(start_row=3, start_column=1, end_row=3, end_column=visible_max)
@@ -361,7 +367,7 @@ def _erm_sheet_header(ws, data, options, section_label):
     ws.cell(
         2, 1,
         _safe_text(
-            f"Маршрут: {_route_token(data.route_number)} — {data.route_name}"
+            f"Маршрут: {_visible_route_number(data.route_number)} — {data.route_name}"
         ),
     )
     ws.merge_cells(start_row=2, start_column=1, end_row=2, end_column=len(ERM_HEADERS))
@@ -380,6 +386,13 @@ def _erm_sheet_header(ws, data, options, section_label):
     return 6
 
 
+def _wrapped_text_row_height(name, address):
+    """Estimate a bounded row height for wrapped stop name and address."""
+    name_lines = max(1, math.ceil(len(str(name or "")) / 34))
+    address_lines = max(1, math.ceil(len(str(address or "")) / 34))
+    return min(96, max(24, max(name_lines, address_lines) * 15))
+
+
 def write_route_section_table(ws, row, section, *, empty_message=None):
     """Write one ERM direction and return the first row after the section."""
     first_data_row = row
@@ -395,13 +408,15 @@ def write_route_section_table(ws, row, section, *, empty_message=None):
     has_missing_technical_data = False
     for sequence, stop in enumerate(section.stops, start=1):
         external_code = str(stop.get("external_code") or "").strip()
+        name = str(stop.get("name") or "")
+        address = str(stop.get("address") or "")
         latitude = stop.get("latitude")
         longitude = stop.get("longitude")
         values = (
             sequence,
             _safe_text(external_code) if external_code else None,
-            _safe_text(str(stop.get("name") or "")),
-            _safe_text(str(stop.get("address") or "")) if stop.get("address") else None,
+            _safe_text(name),
+            _safe_text(address) if address else None,
             float(latitude) if latitude is not None else None,
             float(longitude) if longitude is not None else None,
         )
@@ -420,6 +435,7 @@ def write_route_section_table(ws, row, section, *, empty_message=None):
         ws.cell(row, 12, f"=SUM($K${first_data_row}:K{row})").number_format = "0.000"
         for column in range(1, len(ERM_HEADERS) + 1):
             _style_cell(ws.cell(row, column), center=column not in (3, 4))
+        ws.row_dimensions[row].height = _wrapped_text_row_height(name, address)
         missing_columns = []
         if not external_code:
             missing_columns.append(2)
@@ -452,7 +468,8 @@ def _finalize_erm_sheet(ws, data, last_row):
     for index, width in enumerate(widths, start=1):
         ws.column_dimensions[get_column_letter(index)].width = width
     for row in range(1, last_row + 2):
-        ws.row_dimensions[row].height = 38 if row == 5 else 24
+        if ws.row_dimensions[row].height is None:
+            ws.row_dimensions[row].height = 38 if row == 5 else 24
     ws.row_dimensions[2].height = min(
         96, 30 + len(data.route_name) // 35 * 12
     )
@@ -471,8 +488,12 @@ def build_erm_workbook(data, options):
     parameters = workbook.active
     parameters.title = "Параметры"
     row = _erm_sheet_header(
-        parameters, data, options, _SECTION_LABELS["forward"]
+        parameters, data, options, "ПАРАМЕТРЫ МАРШРУТА"
     )
+    write_section_header(
+        parameters, row, _SECTION_LABELS["forward"], end_col=len(ERM_HEADERS)
+    )
+    row += 1
     row = write_route_section_table(parameters, row, data.forward)
     row += 1
     write_section_header(
