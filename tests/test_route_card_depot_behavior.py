@@ -18,6 +18,12 @@ HARNESS = ROOT / "tests" / "js" / "route_card_depot_behavior.js"
         "invalid_row",
         "empty_rows",
         "valid_payload",
+        "load_failure_retry",
+        "save_route_race",
+        "save_direction_race",
+        "saving_locks_mutations",
+        "main_runtime_validation",
+        "document_modal_keyboard",
     ],
 )
 def test_route_card_depot_behavior(scenario):

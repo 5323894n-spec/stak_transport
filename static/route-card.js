@@ -23,7 +23,8 @@ function routeCardState(routeId) {
       depotDirection: "depot_out",
       depotDrafts: { depot_out: null, depot_in: null },
       depotStopOptions: [], depotErrors: {}, depotError: "",
-      depotLoading: false, depotSaving: false, depotLoadToken: 0,
+      depotLoading: false, depotSaving: false, depotLoadToken: 0, depotSaveToken: 0,
+      segmentErrors: {},
       documentDialogOpen: false, documentType: "schedule",
       documentSeason: "winter", documentDate: today(),
     };
@@ -95,20 +96,47 @@ function routeCardCanEdit() {
   return !!USER && ["админ", "эксплуатация"].includes(USER.role);
 }
 
+function routeCardDocumentFocusable() {
+  const modal = document.querySelector(".route-document-dialog");
+  return modal ? Array.from(modal.querySelectorAll(
+    'button:not([disabled]), select:not([disabled]), input:not([disabled]), [tabindex]:not([tabindex="-1"])'
+  )) : [];
+}
+
 function routeCardOpenDocumentDialog() {
   window._routeCard.documentDialogOpen = true;
   renderRouteCard(window._routeCard);
+  const focusable = routeCardDocumentFocusable();
+  if (focusable.length) focusable[0].focus();
 }
 
 function routeCardCloseDocumentDialog() {
   window._routeCard.documentDialogOpen = false;
   renderRouteCard(window._routeCard);
+  const opener = document.querySelector(".route-document-open");
+  if (opener) opener.focus();
 }
 
+function routeCardDocumentKeydown(event) {
+  if (event.key === "Escape") {
+    event.preventDefault();
+    routeCardCloseDocumentDialog();
+    return;
+  }
+  if (event.key !== "Tab") return;
+  const focusable = routeCardDocumentFocusable();
+  if (!focusable.length) { event.preventDefault(); return; }
+  const first = focusable[0], last = focusable[focusable.length - 1];
+  if (event.shiftKey && document.activeElement === first) {
+    event.preventDefault(); last.focus();
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault(); first.focus();
+  }
+}
 function routeCardDocumentDialog(state) {
   if (!state.documentDialogOpen) return "";
   return `<div class="modal-bg route-document-dialog-bg" role="presentation">
-    <div class="modal route-document-dialog" role="dialog" aria-modal="true" aria-labelledby="route-document-title">
+    <div class="modal route-document-dialog" role="dialog" aria-modal="true" aria-labelledby="route-document-title" onkeydown="routeCardDocumentKeydown(event)">
       <h3 id="route-document-title">Экспорт документов</h3>
       <p class="muted">Параметры уже можно проверить. Формирование файлов будет подключено на следующем этапе.</p>
       <div class="route-document-fields">
@@ -199,27 +227,50 @@ async function routeCardCoordinates(index) {
   toast("Координаты сохранены"); renderRouteCard(state);
 }
 
+function routeCardRuntime(value, label) {
+  const text = String(value == null ? "" : value).trim();
+  if (!/^\d+$/.test(text)) return { error: `${label} должно быть целым неотрицательным числом секунд` };
+  const number = Number(text);
+  if (!Number.isSafeInteger(number) || number < 0) {
+    return { error: `${label} должно быть целым неотрицательным числом секунд` };
+  }
+  return { value: number };
+}
+
 function routeTracePayload(state) {
-  return routeCardDraft(state).map((row, index) => ({
-    stop_id: row.stop_id, sequence: index + 1,
-    distance_from_prev_km: index ? +(row.distance_from_prev_km || 0) : 0,
-    run_time_day_sec: +(row.run_time_day_sec || 0),
-    run_time_night_sec: +(row.run_time_night_sec || 0),
-    run_time_sec: +(row.run_time_sec || 0), dwell_time_sec: +(row.dwell_time_sec || 0),
-    distance_source: row.distance_source || "manual", boarding_allowed: row.boarding_allowed,
-    alighting_allowed: row.alighting_allowed, is_timing_point: row.is_timing_point,
-    source_detail: row.source_detail || null,
-  }));
+  const errors = {}, items = [];
+  routeCardDraft(state).forEach((row, index) => {
+    const rowErrors = [];
+    const day = routeCardRuntime(row.run_time_day_sec, "Дневное время");
+    const night = routeCardRuntime(row.run_time_night_sec, "Ночное время");
+    if (day.error) rowErrors.push(day.error);
+    if (night.error) rowErrors.push(night.error);
+    if (rowErrors.length) errors[index] = rowErrors.join(". ");
+    else items.push({
+      stop_id: row.stop_id, sequence: index + 1,
+      distance_from_prev_km: index ? +(row.distance_from_prev_km || 0) : 0,
+      run_time_day_sec: day.value, run_time_night_sec: night.value,
+      run_time_sec: +(row.run_time_sec || 0), dwell_time_sec: +(row.dwell_time_sec || 0),
+      distance_source: row.distance_source || "manual", boarding_allowed: row.boarding_allowed,
+      alighting_allowed: row.alighting_allowed, is_timing_point: row.is_timing_point,
+      source_detail: row.source_detail || null,
+    });
+  });
+  state.segmentErrors = errors;
+  return Object.keys(errors).length ? null : items;
 }
 
 async function routeCardSaveTrace() {
   const state = window._routeCard;
-  await api(`/api/routes/${state.routeId}/stops/${state.direction}`, { method: "PUT", body: { items: routeTracePayload(state) } });
+  const items = routeTracePayload(state);
+  if (items === null) { renderRouteCard(state); return; }
+  await api(`/api/routes/${state.routeId}/stops/${state.direction}`, {
+    method: "PUT", body: { items },
+  });
   toast("Трасса сохранена"); await routeCardReload();
 }
-
 function routeCardDepotRows(state = window._routeCard) {
-  return state.depotDrafts[state.depotDirection] || [];
+  return state.depotDrafts[state.depotDirection];
 }
 
 function routeCardDepotDirectionLabel(direction) {
@@ -245,8 +296,8 @@ function routeCardDepotRequestIsCurrent(state, requestToken, direction) {
     && direction === state.depotDirection;
 }
 
-async function routeCardLoadDepot(direction = window._routeCard.depotDirection) {
-  const state = window._routeCard;
+async function routeCardLoadDepot(direction, state = window._routeCard) {
+  direction = direction || state.depotDirection;
   const requestToken = ++state.depotLoadToken;
   state.depotLoading = true; state.depotError = "";
   renderRouteCard(state);
@@ -261,6 +312,7 @@ async function routeCardLoadDepot(direction = window._routeCard.depotDirection) 
     state.depotErrors = {};
   } catch (error) {
     if (!routeCardDepotRequestIsCurrent(state, requestToken, direction)) return;
+    state.depotDrafts[direction] = null;
     state.depotError = error.message;
   } finally {
     if (routeCardDepotRequestIsCurrent(state, requestToken, direction)) {
@@ -270,20 +322,35 @@ async function routeCardLoadDepot(direction = window._routeCard.depotDirection) 
   }
 }
 
+async function routeCardRetryDepot() {
+  const state = window._routeCard;
+  if (state.depotSaving) return;
+  await routeCardLoadDepot(state.depotDirection, state);
+}
+
 async function routeCardDepotDirection(direction) {
   if (!["depot_out", "depot_in"].includes(direction)) return;
   const state = window._routeCard;
+  if (state.depotSaving) return;
   if (direction !== state.depotDirection) {
     state.depotLoadToken += 1;
     state.depotLoading = false;
   }
   state.depotDirection = direction; state.depotError = "";
   renderRouteCard(state);
-  if (!state.depotDrafts[direction]) await routeCardLoadDepot(direction);
+  if (!Array.isArray(state.depotDrafts[direction])) {
+    await routeCardLoadDepot(direction, state);
+  }
+}
+function routeCardDepotCanMutate(state = window._routeCard) {
+  return window._routeCard === state && routeCardCanEdit() && !state.depotSaving
+    && Array.isArray(routeCardDepotRows(state));
 }
 
 function routeCardDepotChange(index, field, value) {
-  const state = window._routeCard, row = routeCardDepotRows(state)[index];
+  const state = window._routeCard;
+  if (!routeCardDepotCanMutate(state)) return;
+  const row = routeCardDepotRows(state)[index];
   if (!row) return;
   if (field === "stop_id") {
     row.stop_id = value === "" ? "" : +value;
@@ -297,27 +364,29 @@ function routeCardDepotChange(index, field, value) {
 }
 
 function routeCardDepotMove(index, delta) {
-  const state = window._routeCard, rows = routeCardDepotRows(state);
-  const next = index + delta;
-  if (!routeCardCanEdit() || next < 0 || next >= rows.length) return;
+  const state = window._routeCard;
+  if (!routeCardDepotCanMutate(state)) return;
+  const rows = routeCardDepotRows(state), next = index + delta;
+  if (next < 0 || next >= rows.length) return;
   [rows[index], rows[next]] = [rows[next], rows[index]];
   state.depotErrors = {};
   renderRouteCard(state);
 }
 
 function routeCardDepotRemove(index) {
-  if (!routeCardCanEdit()) return;
   const state = window._routeCard;
+  if (!routeCardDepotCanMutate(state)) return;
   routeCardDepotRows(state).splice(index, 1);
   state.depotErrors = {};
   renderRouteCard(state);
 }
 
 async function routeCardDepotAdd() {
-  if (!routeCardCanEdit()) return;
   const state = window._routeCard;
+  if (!routeCardDepotCanMutate(state)) return;
   if (!state.depotStopOptions.length) {
     const stops = await api("/api/stops?active=1");
+    if (!routeCardDepotCanMutate(state)) return;
     state.depotStopOptions = stops.items || [];
   }
   if (!state.depotStopOptions.length) {
@@ -329,12 +398,12 @@ async function routeCardDepotAdd() {
       stop.id, `${stop.name}${stop.external_code ? " · " + stop.external_code : ""}`,
     ]),
   }]);
-  if (!value) return;
+  if (!value || !routeCardDepotCanMutate(state)) return;
   const stop = state.depotStopOptions.find(item => item.id === +value.stop_id);
+  if (!stop) return;
   routeCardDepotRows(state).push(routeCardDepotRow({ stop_id: stop.id, stop }));
   renderRouteCard(state);
 }
-
 function routeCardDepotRuntime(value, label) {
   const text = String(value == null ? "" : value).trim();
   if (!/^\d+$/.test(text)) return { error: `${label} должно быть целым числом секунд` };
@@ -346,8 +415,9 @@ function routeCardDepotRuntime(value, label) {
 }
 
 function routeCardDepotPayload(state = window._routeCard) {
-  const errors = {}, items = [];
-  routeCardDepotRows(state).forEach((row, index) => {
+  const errors = {}, items = [], rows = routeCardDepotRows(state);
+  if (!Array.isArray(rows)) { state.depotErrors = {}; return null; }
+  rows.forEach((row, index) => {
     const rowErrors = [];
     const stopId = Number(row.stop_id);
     if (!Number.isSafeInteger(stopId) || stopId <= 0) {
@@ -375,52 +445,73 @@ function routeCardDepotPayload(state = window._routeCard) {
   return Object.keys(errors).length ? null : items;
 }
 
+function routeCardDepotSaveIsCurrent(state, saveToken, direction) {
+  return window._routeCard === state && state.depotSaveToken === saveToken
+    && state.depotDirection === direction;
+}
+
 async function routeCardSaveDepot() {
   const state = window._routeCard;
-  if (!routeCardCanEdit()) return;
+  if (!routeCardCanEdit() || state.depotSaving) return;
+  const routeId = state.routeId, direction = state.depotDirection;
+  if (!Array.isArray(state.depotDrafts[direction])) {
+    state.depotError = "Сначала загрузите нулевой рейс";
+    renderRouteCard(state);
+    return;
+  }
   const items = routeCardDepotPayload(state);
   if (items === null) { renderRouteCard(state); return; }
+  const saveToken = state.depotSaveToken = (state.depotSaveToken || 0) + 1;
   state.depotSaving = true; state.depotError = ""; renderRouteCard(state);
   try {
-    await api(`/api/routes/${state.routeId}/depot-stops/${state.depotDirection}`, {
+    await api(`/api/routes/${routeId}/depot-stops/${direction}`, {
       method: "PUT", body: { items },
     });
+    if (!routeCardDepotSaveIsCurrent(state, saveToken, direction)) return;
     state.depotSaving = false;
-    toast(`${routeCardDepotDirectionLabel(state.depotDirection)}: данные сохранены`);
-    await routeCardLoadDepot(state.depotDirection);
+    toast(`${routeCardDepotDirectionLabel(direction)}: данные сохранены`);
+    state.depotDrafts[direction] = null;
+    await routeCardLoadDepot(direction, state);
   } catch (error) {
+    if (!routeCardDepotSaveIsCurrent(state, saveToken, direction)) return;
     state.depotSaving = false; state.depotError = error.message;
     toast(error.message, true); renderRouteCard(state);
   }
 }
-
 function routeCardDepot(state) {
-  const canEdit = routeCardCanEdit();
-  if (state.depotLoading) return '<div class="route-empty">Загрузка нулевых рейсов…</div>';
+  const canEdit = routeCardCanEdit(), locked = state.depotSaving;
+  const tabDisabled = locked ? "disabled" : "";
+  const tabs = `<div class="route-depot-tabs"><button class="btn ${state.depotDirection === "depot_out" ? "" : "sec"}" onclick="routeCardDepotDirection('depot_out')" ${tabDisabled}>Из парка</button><button class="btn ${state.depotDirection === "depot_in" ? "" : "sec"}" onclick="routeCardDepotDirection('depot_in')" ${tabDisabled}>В парк</button></div>`;
+  if (state.depotLoading) return `${tabs}<div class="route-empty">Загрузка нулевых рейсов…</div>`;
   const rows = routeCardDepotRows(state);
+  if (!Array.isArray(rows)) {
+    const message = state.depotError || "Данные нулевого рейса ещё не загружены";
+    return `${tabs}<div class="vio r" role="alert"><b>Не удалось загрузить нулевой рейс</b>${esc(message)}</div>
+      <div class="route-depot-editor-controls"><button class="btn sec" onclick="routeCardRetryDepot()" ${locked ? "disabled" : ""}>Повторить загрузку</button></div>`;
+  }
+  const editorEnabled = canEdit && !locked;
   const content = rows.map((row, index) => {
     const options = state.depotStopOptions.map(stop => `<option value="${stop.id}" ${+row.stop_id === stop.id ? "selected" : ""}>${esc(stop.name)}${stop.external_code ? " · " + esc(stop.external_code) : ""}</option>`).join("");
     const unresolved = row.stop && !state.depotStopOptions.some(stop => stop.id === +row.stop_id)
       ? `<option value="${esc(row.stop_id)}" selected>${esc(row.stop.name)} · архивная</option>` : "";
-    const disabled = canEdit ? "" : "disabled";
+    const disabled = editorEnabled ? "" : "disabled";
     return `<div class="route-depot-row">
       <span class="route-stop-seq">${index + 1}</span>
       <label class="route-depot-stop">Остановка<select ${disabled} onchange="routeCardDepotChange(${index},'stop_id',this.value)"><option value="">Выберите остановку</option>${unresolved}${options}</select></label>
       <label>Расстояние, км<input type="text" inputmode="decimal" value="${esc(row.distance_from_prev_km)}" ${disabled} onchange="routeCardDepotChange(${index},'distance_from_prev_km',this.value)"></label>
       <label>Днём, сек<input type="text" inputmode="numeric" value="${esc(row.run_time_day_sec)}" ${disabled} onchange="routeCardDepotChange(${index},'run_time_day_sec',this.value)"></label>
       <label>Ночью, сек<input type="text" inputmode="numeric" value="${esc(row.run_time_night_sec)}" ${disabled} onchange="routeCardDepotChange(${index},'run_time_night_sec',this.value)"></label>
-      <div class="route-stop-actions route-depot-editor-controls">${canEdit ? `<button class="btn small sec" onclick="routeCardDepotMove(${index},-1)" ${index ? "" : "disabled"}>↑</button><button class="btn small sec" onclick="routeCardDepotMove(${index},1)" ${index + 1 < rows.length ? "" : "disabled"}>↓</button><button class="btn small danger" onclick="routeCardDepotRemove(${index})">✕</button>` : ""}</div>
+      <div class="route-stop-actions route-depot-editor-controls">${canEdit ? `<button class="btn small sec" onclick="routeCardDepotMove(${index},-1)" ${!editorEnabled || !index ? "disabled" : ""}>↑</button><button class="btn small sec" onclick="routeCardDepotMove(${index},1)" ${!editorEnabled || index + 1 >= rows.length ? "disabled" : ""}>↓</button><button class="btn small danger" onclick="routeCardDepotRemove(${index})" ${disabled}>✕</button>` : ""}</div>
       ${state.depotErrors[index] ? `<div class="route-depot-error" role="alert">${esc(state.depotErrors[index])}</div>` : ""}
     </div>`;
   }).join("");
-  return `<div class="route-depot-tabs"><button class="btn ${state.depotDirection === "depot_out" ? "" : "sec"}" onclick="routeCardDepotDirection('depot_out')">Из парка</button><button class="btn ${state.depotDirection === "depot_in" ? "" : "sec"}" onclick="routeCardDepotDirection('depot_in')">В парк</button></div>
-    <div class="route-card-toolbar route-depot-editor-controls"><div><b>${routeCardDepotDirectionLabel(state.depotDirection)}</b><div class="muted">Время указывается целыми секундами отдельно для дня и ночи.</div></div>${canEdit ? `<button class="btn sec" onclick="routeCardDepotAdd()">+ Остановка</button><button class="btn" onclick="routeCardSaveDepot()" ${state.depotSaving ? "disabled" : ""}>${state.depotSaving ? "Сохранение…" : "Сохранить"}</button>` : '<span class="badge b-mut">Только просмотр</span>'}</div>
+  return `${tabs}
+    <div class="route-card-toolbar route-depot-editor-controls"><div><b>${routeCardDepotDirectionLabel(state.depotDirection)}</b><div class="muted">Время указывается целыми секундами отдельно для дня и ночи.</div></div>${canEdit ? `<button class="btn sec" onclick="routeCardDepotAdd()" ${editorEnabled ? "" : "disabled"}>+ Остановка</button><button class="btn" onclick="routeCardSaveDepot()" ${editorEnabled ? "" : "disabled"}>${locked ? "Сохранение…" : "Сохранить"}</button>` : '<span class="badge b-mut">Только просмотр</span>'}</div>
     ${state.depotError ? `<div class="vio r"><b>Не удалось выполнить действие</b>${esc(state.depotError)}</div>` : ""}
     <div class="route-depot-grid">${content || '<div class="route-empty">Остановки нулевого рейса ещё не заданы. Пустой список можно сохранить, чтобы очистить направление.</div>'}</div>`;
 }
-
 function routeCardSegments(state) {
-  const rows = routeCardDraft(state).map((row, index) => `<tr><td>${index + 1}</td><td>${esc(row.stop.name)}</td>
+  const rows = routeCardDraft(state).map((row, index) => `<tr><td>${index + 1}</td><td>${esc(row.stop.name)}${state.segmentErrors[index] ? `<div class="route-depot-error route-segment-error" role="alert">${esc(state.segmentErrors[index])}</div>` : ""}</td>
     <td><input type="number" min="0" step="0.001" value="${index ? esc(row.distance_from_prev_km) : 0}" ${index ? "" : "disabled"} onchange="routeCardSegment(${index},'distance_from_prev_km',this.value)"></td>
     <td><input type="number" min="0" step="1" value="${esc(row.run_time_sec)}" onchange="routeCardSegment(${index},'run_time_sec',this.value)"></td>
     <td><input type="number" min="0" step="1" value="${esc(row.run_time_day_sec)}" onchange="routeCardSegment(${index},'run_time_day_sec',this.value)"></td>
@@ -432,9 +523,12 @@ function routeCardSegments(state) {
 }
 
 function routeCardSegment(index, field, value) {
-  routeCardDraft(window._routeCard)[index][field] = Math.max(0, +value || 0);
+  const state = window._routeCard, row = routeCardDraft(state)[index];
+  if (!row) return;
+  if (["run_time_day_sec", "run_time_night_sec"].includes(field)) row[field] = value;
+  else row[field] = Math.max(0, +value || 0);
+  delete state.segmentErrors[index];
 }
-
 function routeMapPoints(state) {
   const plottedRows = routeCardDraft(state).map((row, index) => ({ row, sequence: index + 1 }))
     .filter(item => item.row.stop.latitude != null && item.row.stop.longitude != null);

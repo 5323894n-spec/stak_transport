@@ -36,9 +36,9 @@ def test_depot_editor_uses_authenticated_api_contract_and_reload_after_save():
     assert "function routeCardDepotRemove" in source
     assert "function routeCardDepotAdd" in source
     assert "/depot-stops?direction=${direction}" in source
-    assert "/depot-stops/${state.depotDirection}" in source
+    assert "/api/routes/${routeId}/depot-stops/${direction}" in source
     assert "method: \"PUT\"" in source
-    assert "await routeCardLoadDepot(state.depotDirection)" in source
+    assert "await routeCardLoadDepot(direction, state)" in source
 
 
 def test_depot_editor_validates_rows_without_coercing_invalid_text_to_zero():
