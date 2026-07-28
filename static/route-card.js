@@ -239,6 +239,12 @@ function routeCardDepotRow(row) {
   };
 }
 
+function routeCardDepotRequestIsCurrent(state, requestToken, direction) {
+  return window._routeCard === state
+    && requestToken === state.depotLoadToken
+    && direction === state.depotDirection;
+}
+
 async function routeCardLoadDepot(direction = window._routeCard.depotDirection) {
   const state = window._routeCard;
   const requestToken = ++state.depotLoadToken;
@@ -249,15 +255,15 @@ async function routeCardLoadDepot(direction = window._routeCard.depotDirection) 
       api(`/api/routes/${state.routeId}/depot-stops?direction=${direction}`),
       api("/api/stops?active=1"),
     ]);
-    if (requestToken !== state.depotLoadToken || direction !== state.depotDirection) return;
+    if (!routeCardDepotRequestIsCurrent(state, requestToken, direction)) return;
     state.depotStopOptions = stops.items || [];
     state.depotDrafts[direction] = (depot.items || []).map(routeCardDepotRow);
     state.depotErrors = {};
   } catch (error) {
-    if (requestToken !== state.depotLoadToken) return;
+    if (!routeCardDepotRequestIsCurrent(state, requestToken, direction)) return;
     state.depotError = error.message;
   } finally {
-    if (requestToken === state.depotLoadToken) {
+    if (routeCardDepotRequestIsCurrent(state, requestToken, direction)) {
       state.depotLoading = false;
       renderRouteCard(state);
     }
@@ -267,6 +273,10 @@ async function routeCardLoadDepot(direction = window._routeCard.depotDirection) 
 async function routeCardDepotDirection(direction) {
   if (!["depot_out", "depot_in"].includes(direction)) return;
   const state = window._routeCard;
+  if (direction !== state.depotDirection) {
+    state.depotLoadToken += 1;
+    state.depotLoading = false;
+  }
   state.depotDirection = direction; state.depotError = "";
   renderRouteCard(state);
   if (!state.depotDrafts[direction]) await routeCardLoadDepot(direction);
