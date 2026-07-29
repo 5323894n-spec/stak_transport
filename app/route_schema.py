@@ -264,6 +264,21 @@ CREATE TABLE IF NOT EXISTS shift_generation_previews(
 );
 CREATE INDEX IF NOT EXISTS idx_shift_generation_preview_scope
   ON shift_generation_previews(route_id,day_type,username,created_at);
+
+CREATE TABLE IF NOT EXISTS route_geometries(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  route_id INTEGER NOT NULL REFERENCES routes(id) ON DELETE CASCADE,
+  direction TEXT NOT NULL CHECK(direction IN ('forward','backward')),
+  geometry_json TEXT NOT NULL,
+  source TEXT NOT NULL CHECK(source IN ('manual','osrm')),
+  version INTEGER NOT NULL DEFAULT 1 CHECK(version > 0),
+  updated_by TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE(route_id,direction)
+);
+CREATE INDEX IF NOT EXISTS idx_route_geometries_route
+  ON route_geometries(route_id,direction);
 """
 
 
