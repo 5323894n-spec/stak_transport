@@ -116,3 +116,23 @@ def test_route_document_dialog_download_contract():
     assert 'id="route-document-season"' in source
     assert 'id="route-document-date"' in source
     assert 'onclick="routeCardDocumentDownload()"' in source
+    assert "function routeCardDocumentToday" in source
+    today_source = source[
+        source.index("function routeCardDocumentToday"):
+        source.index("function routeCardState")
+    ]
+    assert "getFullYear()" in today_source
+    assert "getMonth()" in today_source
+    assert "getDate()" in today_source
+    assert "toISOString" not in today_source
+    assert "documentDate: routeCardDocumentToday()" in source
+    assert 'document.getElementById("route-document-date")' in source
+    assert "setCustomValidity" in source
+    assert "reportValidity()" in source
+    assert "focus()" in source
+    date_control = source[
+        source.index('<input id="route-document-date"'):
+        source.index("</label>", source.index('<input id="route-document-date"'))
+    ]
+    assert "required" in date_control
+    assert "setCustomValidity('')" in date_control

@@ -11,6 +11,13 @@ const ROUTE_CARD_TABS = [
 
 function routeCardOpen(routeId) { location.hash = `#/routeCard/${+routeId}`; }
 
+function routeCardDocumentToday(now = new Date()) {
+  const year = now.getFullYear();
+  const month = String(now.getMonth() + 1).padStart(2, "0");
+  const day = String(now.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
 function routeCardState(routeId) {
   if (!window._routeCard || window._routeCard.routeId !== +routeId) {
     window._routeCard = {
@@ -26,7 +33,7 @@ function routeCardState(routeId) {
       depotLoading: false, depotSaving: false, depotLoadToken: 0, depotSaveToken: 0,
       segmentErrors: { forward: {}, backward: {} },
       documentDialogOpen: false, documentType: "schedule",
-      documentSeason: "winter", documentDate: today(),
+      documentSeason: "winter", documentDate: routeCardDocumentToday(),
     };
   }
   return window._routeCard;
@@ -135,10 +142,18 @@ function routeCardDocumentKeydown(event) {
 }
 function routeCardDocumentDownload() {
   const state = window._routeCard;
+  const dateInput = document.getElementById("route-document-date");
   if (!state.documentDate) {
-    toast("Укажите дату начала действия", true);
+    const message = "Укажите дату начала действия";
+    if (dateInput) {
+      dateInput.setCustomValidity(message);
+      dateInput.reportValidity();
+      dateInput.focus();
+    }
+    toast(message, true);
     return;
   }
+  if (dateInput) dateInput.setCustomValidity("");
   const endpoint = state.documentType === "erm"
     ? "erm-export.xlsx" : "schedule-document.xlsx";
   const params = new URLSearchParams({
@@ -158,7 +173,7 @@ function routeCardDocumentDialog(state) {
       <div class="route-document-fields">
         <label for="route-document-kind">Документ<select id="route-document-kind" onchange="window._routeCard.documentType=this.value"><option value="schedule" ${state.documentType === "schedule" ? "selected" : ""}>Расписание</option><option value="erm" ${state.documentType === "erm" ? "selected" : ""}>ЭРМ</option></select></label>
         <label for="route-document-season">Сезон<select id="route-document-season" onchange="window._routeCard.documentSeason=this.value"><option value="winter" ${state.documentSeason === "winter" ? "selected" : ""}>Зима</option><option value="summer" ${state.documentSeason === "summer" ? "selected" : ""}>Лето</option></select></label>
-        <label for="route-document-date">Дата начала действия<input id="route-document-date" type="date" value="${esc(state.documentDate)}" onchange="window._routeCard.documentDate=this.value"></label>
+        <label for="route-document-date">Дата начала действия<input id="route-document-date" type="date" required value="${esc(state.documentDate)}" onchange="this.setCustomValidity('');window._routeCard.documentDate=this.value"></label>
       </div>
       <div class="foot"><button class="btn sec" onclick="routeCardCloseDocumentDialog()">Отмена</button><button class="btn" onclick="routeCardDocumentDownload()">Сформировать</button></div>
     </div></div>`;
