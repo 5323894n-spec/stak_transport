@@ -91,12 +91,27 @@ def test_depot_editor_styles_are_responsive_and_print_safe():
     assert ".route-document-dialog" in print_rules
 
 
+def test_coordinate_editor_enforces_geographic_bounds():
+    source = _source("route-card.js")
+    app_source = _source("app.js")
+
+    assert 'k: "latitude", label: "Широта", type: "number", min: "-90", max: "90"' in source
+    assert 'k: "longitude", label: "Долгота", type: "number", min: "-180", max: "180"' in source
+    assert "function routeCardCoordinateValue" in source
+    assert "Number.isFinite" in source
+    assert "`${label} должна быть от ${min} до ${max}`" in source
+    assert 'routeCardCoordinateValue(value.latitude, "Широта", -90, 90)' in source
+    assert 'routeCardCoordinateValue(value.longitude, "Долгота", -180, 180)' in source
+    assert 'f.min != null ? `min="${f.min}"` : ""' in app_source
+    assert 'f.max != null ? `max="${f.max}"` : ""' in app_source
+
+
 def test_route_document_asset_versions_are_bumped_without_leaflet_reordering():
     index = _source("index.html")
 
-    assert "styles.css?v=3.2&amp;route=3.9" in index
-    assert "app.js?v=3.2&amp;route=3.9" in index
-    assert "route-card.js?v=3.9" in index
+    assert "styles.css?v=3.2&amp;route=4.0" in index
+    assert "app.js?v=3.2&amp;route=4.0" in index
+    assert "route-card.js?v=4.0" in index
     assert index.index("/static/vendor/leaflet/leaflet.js") < index.index(
         "/static/route-card.js"
     )

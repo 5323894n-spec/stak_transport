@@ -63,8 +63,8 @@ def test_route_map_styles_own_responsive_screen_and_print_sizing():
     assert "height: 460px" in styles
     assert "height: 320px" in styles
     assert "@media print" in styles
-    assert 'styles.css?v=3.2&amp;route=3.9' in index
-    assert 'route-card.js?v=3.9' in index
+    assert 'styles.css?v=3.2&amp;route=4.0' in index
+    assert 'route-card.js?v=4.0' in index
     print_styles = styles.split("@media print", 2)[2].split("\n}", 1)[0]
     assert ".route-map { min-height: 360px;" in print_styles
 

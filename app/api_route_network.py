@@ -2,6 +2,7 @@
 """Остановки и упорядоченные трассы маршрутов."""
 import datetime
 import json
+import math
 import secrets
 import sqlite3
 from decimal import Decimal, InvalidOperation
@@ -29,6 +30,22 @@ _SQLITE_INTEGER_MAX = 2**63 - 1
 
 def _now():
     return datetime.datetime.now().isoformat(timespec="seconds")
+
+
+def _coordinate_value(value, label, lower, upper):
+    if value is None or value == "":
+        return None
+    if isinstance(value, bool):
+        raise HTTPException(400, f"{label} должна быть от {lower} до {upper}")
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        raise HTTPException(
+            400, f"{label} должна быть от {lower} до {upper}"
+        ) from None
+    if not math.isfinite(number) or not lower <= number <= upper:
+        raise HTTPException(400, f"{label} должна быть от {lower} до {upper}")
+    return number
 
 
 def _route_or_404(con, route_id):
@@ -297,6 +314,14 @@ def stop_update(stop_id: int, payload: dict = Body(...), user=Depends(current_us
         if "external_code" in values:
             code = str(values["external_code"] or "").strip()
             values["external_code"] = code or None
+        for field, label, lower, upper in (
+            ("latitude", "Широта", -90, 90),
+            ("longitude", "Долгота", -180, 180),
+        ):
+            if field in values:
+                values[field] = _coordinate_value(
+                    values[field], label, lower, upper
+                )
         values["updated_at"] = _now()
         fields = list(values)
         con.execute(

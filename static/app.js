@@ -165,7 +165,9 @@ function field(f, v) {
     return `<label class="f">${esc(f.label)}<select data-k="${f.k}">${f.empty ? '<option value="">—</option>' : ""}${opts}</select></label>`;
   }
   if (f.type === "textarea") return `<label class="f">${esc(f.label)}<textarea data-k="${f.k}" rows="2">${esc(val)}</textarea></label>`;
-  return `<label class="f">${esc(f.label)}<input data-k="${f.k}" type="${f.type || "text"}" value="${esc(val)}" ${f.step ? `step="${f.step}"` : ""}></label>`;
+  const min = f.min != null ? `min="${f.min}"` : "";
+  const max = f.max != null ? `max="${f.max}"` : "";
+  return `<label class="f">${esc(f.label)}<input data-k="${f.k}" type="${f.type || "text"}" value="${esc(val)}" ${f.step ? `step="${f.step}"` : ""} ${min} ${max}></label>`;
 }
 function formModal(title, fields, values = {}, note = "") {
   const body = fields.map(f => field(f, values[f.k])).join("");

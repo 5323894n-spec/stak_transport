@@ -5,6 +5,8 @@ from dataclasses import dataclass
 import datetime
 from typing import Any
 
+from .route_depot import get_depot_rows
+
 
 _SEASONS = {
     "winter": ("ЗИМНИЙ ПЕРИОД", "ЗИМА"),
@@ -162,6 +164,25 @@ def _route_sections(con, route_id):
         item["run_time_day_sec"] = int(item["run_time_day_sec"] or 0)
         item["run_time_night_sec"] = int(item["run_time_night_sec"] or 0)
         grouped[item["direction"]].append(item)
+    for direction in ("depot_out", "depot_in"):
+        if grouped[direction]:
+            continue
+        for fallback_row in get_depot_rows(con, route_id, direction):
+            item = dict(fallback_row)
+            stop = dict(item.pop("stop", {}) or {})
+            for key in (
+                "name", "external_code", "address", "latitude", "longitude",
+            ):
+                item[key] = stop.get(key)
+            item["distance_from_prev_km"] = float(
+                item.get("distance_from_prev_km") or 0
+            )
+            item["cumulative_km"] = float(item.get("cumulative_km") or 0)
+            item["run_time_day_sec"] = int(item.get("run_time_day_sec") or 0)
+            item["run_time_night_sec"] = int(
+                item.get("run_time_night_sec") or 0
+            )
+            grouped[direction].append(item)
     return {
         direction: RouteSection(direction, tuple(grouped[direction]))
         for direction in sections

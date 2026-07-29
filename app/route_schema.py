@@ -271,36 +271,40 @@ def _add_column(con, table, name, definition):
     columns = {row[1] for row in con.execute(f"PRAGMA table_info({table})")}
     if name not in columns:
         con.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
+        return True
+    return False
 
 
 def migrate_route_network(con):
     con.executescript(ROUTE_NETWORK_SCHEMA)
-    _add_column(
+    day_runtime_added = _add_column(
         con,
         "route_stops",
         "run_time_day_sec",
         "INTEGER NOT NULL DEFAULT 0 CHECK(run_time_day_sec >= 0)",
     )
-    _add_column(
+    night_runtime_added = _add_column(
         con,
         "route_stops",
         "run_time_night_sec",
         "INTEGER NOT NULL DEFAULT 0 CHECK(run_time_night_sec >= 0)",
     )
-    con.execute(
-        """
-        UPDATE route_stops
-        SET run_time_day_sec=run_time_sec
-        WHERE run_time_day_sec=0 AND run_time_sec>0
-        """
-    )
-    con.execute(
-        """
-        UPDATE route_stops
-        SET run_time_night_sec=run_time_sec
-        WHERE run_time_night_sec=0 AND run_time_sec>0
-        """
-    )
+    if day_runtime_added:
+        con.execute(
+            """
+            UPDATE route_stops
+            SET run_time_day_sec=run_time_sec
+            WHERE run_time_day_sec=0 AND run_time_sec>0
+            """
+        )
+    if night_runtime_added:
+        con.execute(
+            """
+            UPDATE route_stops
+            SET run_time_night_sec=run_time_sec
+            WHERE run_time_night_sec=0 AND run_time_sec>0
+            """
+        )
     _add_column(
         con, "route_trips", "period_id", "INTEGER REFERENCES day_periods(id)"
     )

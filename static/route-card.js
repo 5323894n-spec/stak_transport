@@ -245,16 +245,30 @@ async function routeCardAddStop() {
   renderRouteCard(state);
 }
 
+function routeCardCoordinateValue(value, label, min, max) {
+  if (value === "" || value == null) return { value: null };
+  const number = Number(value);
+  if (!Number.isFinite(number) || number < min || number > max) {
+    return { error: `${label} должна быть от ${min} до ${max}` };
+  }
+  return { value: number };
+}
+
 async function routeCardCoordinates(index) {
   const state = window._routeCard, row = routeCardDraft(state)[index];
   const value = await formModal("Координаты остановки", [
-    { k: "latitude", label: "Широта", type: "number", step: "0.000001" },
-    { k: "longitude", label: "Долгота", type: "number", step: "0.000001" },
+    { k: "latitude", label: "Широта", type: "number", min: "-90", max: "90", step: "0.000001" },
+    { k: "longitude", label: "Долгота", type: "number", min: "-180", max: "180", step: "0.000001" },
   ], row.stop);
   if (!value) return;
-  const latitude = value.latitude === "" ? null : +value.latitude, longitude = value.longitude === "" ? null : +value.longitude;
-  await api(`/api/stops/${row.stop_id}`, { method: "PUT", body: { latitude, longitude } });
-  row.stop.latitude = latitude; row.stop.longitude = longitude;
+  const latitude = routeCardCoordinateValue(value.latitude, "Широта", -90, 90);
+  const longitude = routeCardCoordinateValue(value.longitude, "Долгота", -180, 180);
+  if (latitude.error || longitude.error) {
+    toast(latitude.error || longitude.error, true);
+    return;
+  }
+  await api(`/api/stops/${row.stop_id}`, { method: "PUT", body: { latitude: latitude.value, longitude: longitude.value } });
+  row.stop.latitude = latitude.value; row.stop.longitude = longitude.value;
   toast("Координаты сохранены"); renderRouteCard(state);
 }
 

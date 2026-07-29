@@ -31,6 +31,8 @@ def _insert_route_and_stops(con):
 def test_route_stop_day_and_night_runtimes_are_backfilled_repeat_safely(tmp_path):
     db, con = _open_route_db(tmp_path)
     try:
+        con.execute("ALTER TABLE route_stops DROP COLUMN run_time_night_sec")
+        con.execute("ALTER TABLE route_stops DROP COLUMN run_time_day_sec")
         route_id, stop_id, _ = _insert_route_and_stops(con)
         route_stop_id = con.execute(
             """
@@ -62,6 +64,18 @@ def test_route_stop_day_and_night_runtimes_are_backfilled_repeat_safely(tmp_path
             (route_stop_id,),
         ).fetchone()
         assert tuple(runtime) == (125, 125)
+
+        con.execute(
+            "UPDATE route_stops SET run_time_day_sec=0, run_time_night_sec=0 WHERE id=?",
+            (route_stop_id,),
+        )
+        db.migrate_route_network(con)
+        preserved = con.execute(
+            "SELECT run_time_day_sec, run_time_night_sec "
+            "FROM route_stops WHERE id=?",
+            (route_stop_id,),
+        ).fetchone()
+        assert tuple(preserved) == (0, 0)
 
         with pytest.raises(sqlite3.IntegrityError):
             con.execute(

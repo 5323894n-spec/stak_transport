@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+import json
 from dataclasses import fields, is_dataclass
 from typing import get_type_hints
 
@@ -218,6 +219,44 @@ def test_load_route_document_data_is_ordered_and_neutral(tmp_path):
         not type(value).__module__.startswith("openpyxl")
         for value in _walk(document)
     )
+
+
+def test_load_route_document_data_uses_legacy_erm_depot_fallback(tmp_path):
+    con = _open_db(tmp_path)
+    try:
+        route_id = con.execute(
+            "INSERT INTO routes(number,name) VALUES(?,?)",
+            ("L1", "Legacy ERM"),
+        ).lastrowid
+        stop_id = con.execute(
+            "INSERT INTO stops(external_code,name) VALUES(?,?)",
+            ("300", "Автопарк"),
+        ).lastrowid
+        notes = {
+            "details": {
+                "sheets": {
+                    "из парка": {
+                        "sections": [{"stops": [{
+                            "stop_id": 300,
+                            "stop_name": "Автопарк",
+                            "distance_km": 1.25,
+                            "travel_time": "00:03:00",
+                        }]}],
+                    }
+                }
+            }
+        }
+        con.execute(
+            "UPDATE routes SET notes=? WHERE id=?",
+            (json.dumps(notes, ensure_ascii=False), route_id),
+        )
+        document = load_route_document_data(con, route_id)
+    finally:
+        con.close()
+
+    assert [row["stop_id"] for row in document.depot_out.stops] == [stop_id]
+    assert document.depot_out.stops[0]["distance_from_prev_km"] == 1.25
+    assert document.depot_out.stops[0]["run_time_day_sec"] == 180
 
 
 def test_schedule_trips_are_ordered_on_service_day_axis(tmp_path):

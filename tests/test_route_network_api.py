@@ -72,6 +72,32 @@ def test_create_and_list_stops(client):
     }]
 
 
+@pytest.mark.parametrize(
+    ("payload", "label"),
+    [
+        ({"latitude": 91}, "Широта"),
+        ({"latitude": -91}, "Широта"),
+        ({"longitude": 181}, "Долгота"),
+        ({"longitude": -181}, "Долгота"),
+        ({"latitude": "NaN"}, "Широта"),
+        ({"longitude": True}, "Долгота"),
+    ],
+)
+def test_stop_update_rejects_invalid_coordinates(client, payload, label):
+    stop_id = create_stop(client, "Вокзал", "100")
+
+    response = client.put(f"/api/stops/{stop_id}", json=payload)
+
+    assert response.status_code == 400
+    assert label in response.json()["detail"]
+    listed = next(
+        item for item in client.get("/api/stops").json()["items"]
+        if item["id"] == stop_id
+    )
+    assert listed["latitude"] is None
+    assert listed["longitude"] is None
+
+
 def test_replace_trace_syncs_legacy_route_fields(client, route_id):
     first = create_stop(client, "Вокзал", "100")
     second = create_stop(client, "Автовокзал", "101")
