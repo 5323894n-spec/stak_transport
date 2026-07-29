@@ -601,12 +601,17 @@ def route_osrm_apply(route_id: int, direction: str, payload: dict = Body(...),
 
 def _geometry_summary(direction, record):
     if record is None:
-        return None
+        return {
+            "direction": direction,
+            "source": None,
+            "version": 0,
+            "coordinates": 0,
+        }
     return {
         "direction": direction,
         "source": record["source"],
         "version": record["version"],
-        "coordinate_count": len(record["geometry"]["coordinates"]),
+        "coordinates": len(record["geometry"]["coordinates"]),
     }
 
 
@@ -620,6 +625,7 @@ def route_geometry_save(
     require_write(user, "routes")
     con = db.connect()
     try:
+        con.execute("BEGIN IMMEDIATE")
         _route_or_404(con, route_id)
         old, saved = save_geometry(
             con,
@@ -665,6 +671,7 @@ def route_geometry_delete(
     require_write(user, "routes")
     con = db.connect()
     try:
+        con.execute("BEGIN IMMEDIATE")
         _route_or_404(con, route_id)
         old = delete_geometry(
             con, route_id, direction, payload.get("expected_version")
@@ -676,6 +683,7 @@ def route_geometry_delete(
             "route_geometry",
             route_id,
             old=_geometry_summary(direction, old),
+            new=_geometry_summary(direction, None),
         )
         con.commit()
         return {"ok": True, "direction": direction}

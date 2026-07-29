@@ -230,6 +230,44 @@ def _version_conflict(expected_version, actual_version):
     )
 
 
+def _concurrent_change_conflict():
+    return GeometryVersionConflict(
+        "Геометрия маршрута была изменена другим пользователем."
+    )
+
+
+def _advance_revision(con, route_id, direction):
+    con.execute(
+        """
+        INSERT INTO route_geometry_revisions(route_id, direction, last_version)
+        VALUES(?, ?, 1)
+        ON CONFLICT(route_id, direction) DO UPDATE
+        SET last_version=last_version + 1
+        """,
+        (route_id, direction),
+    )
+    return con.execute(
+        """
+        SELECT last_version
+        FROM route_geometry_revisions
+        WHERE route_id=? AND direction=?
+        """,
+        (route_id, direction),
+    ).fetchone()["last_version"]
+
+
+def _remember_revision(con, route_id, direction, version):
+    con.execute(
+        """
+        INSERT INTO route_geometry_revisions(route_id, direction, last_version)
+        VALUES(?, ?, ?)
+        ON CONFLICT(route_id, direction) DO UPDATE
+        SET last_version=MAX(last_version, excluded.last_version)
+        """,
+        (route_id, direction, version),
+    )
+
+
 def save_geometry(
     con,
     route_id,
@@ -259,8 +297,8 @@ def save_geometry(
         normalized, ensure_ascii=False, separators=(",", ":")
     )
     old_record = geometry_record(current)
-    new_version = actual_version + 1
     if current:
+        new_version = actual_version + 1
         cursor = con.execute(
             """
             UPDATE route_geometries
@@ -278,21 +316,24 @@ def save_geometry(
             ),
         )
         if cursor.rowcount != 1:
-            raise _version_conflict(expected_version, actual_version)
+            raise _concurrent_change_conflict()
+        _remember_revision(con, route_id, direction, new_version)
     else:
+        new_version = _advance_revision(con, route_id, direction)
         try:
             con.execute(
                 """
                 INSERT INTO route_geometries(
                   route_id, direction, geometry_json, source, version,
                   updated_by, created_at, updated_at
-                ) VALUES(?, ?, ?, ?, 1, ?, ?, ?)
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     route_id,
                     direction,
                     serialized,
                     source,
+                    new_version,
                     username,
                     timestamp,
                     timestamp,
@@ -326,5 +367,6 @@ def delete_geometry(con, route_id, direction, expected_version):
         (current["id"], actual_version),
     )
     if cursor.rowcount != 1:
-        raise _version_conflict(expected_version, actual_version)
+        raise _concurrent_change_conflict()
+    _remember_revision(con, route_id, direction, actual_version)
     return old_record

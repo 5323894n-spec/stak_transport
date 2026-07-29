@@ -279,6 +279,13 @@ CREATE TABLE IF NOT EXISTS route_geometries(
 );
 CREATE INDEX IF NOT EXISTS idx_route_geometries_route
   ON route_geometries(route_id,direction);
+
+CREATE TABLE IF NOT EXISTS route_geometry_revisions(
+  route_id INTEGER NOT NULL REFERENCES routes(id) ON DELETE CASCADE,
+  direction TEXT NOT NULL CHECK(direction IN ('forward','backward')),
+  last_version INTEGER NOT NULL DEFAULT 0 CHECK(last_version >= 0),
+  PRIMARY KEY(route_id,direction)
+);
 """
 
 

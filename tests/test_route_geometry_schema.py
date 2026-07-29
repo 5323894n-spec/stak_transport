@@ -70,3 +70,35 @@ def test_route_geometries_enforces_direction_uniqueness_and_route_cascade(tmp_pa
         ).fetchone()[0] == 0
     finally:
         con.close()
+
+
+def test_route_geometry_revisions_schema_is_idempotent_and_cascades(tmp_path):
+    db, con = _open_route_db(tmp_path)
+    try:
+        db.migrate_route_network(con)
+        db.migrate_route_network(con)
+        columns = {
+            row["name"]
+            for row in con.execute(
+                "PRAGMA table_info(route_geometry_revisions)"
+            )
+        }
+        assert columns == {"route_id", "direction", "last_version"}
+
+        route_id = con.execute(
+            "INSERT INTO routes(number, name) VALUES(?, ?)",
+            ("R1", "Счётчик геометрии"),
+        ).lastrowid
+        con.execute(
+            "INSERT INTO route_geometry_revisions("
+            "route_id,direction,last_version) VALUES(?,?,?)",
+            (route_id, "forward", 7),
+        )
+        con.execute("DELETE FROM routes WHERE id=?", (route_id,))
+
+        assert con.execute(
+            "SELECT COUNT(*) FROM route_geometry_revisions WHERE route_id=?",
+            (route_id,),
+        ).fetchone()[0] == 0
+    finally:
+        con.close()

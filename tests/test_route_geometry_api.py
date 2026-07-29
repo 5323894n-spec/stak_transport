@@ -695,17 +695,28 @@ def test_successful_geometry_audits_only_contain_summaries(geometry_api):
     assert [row["action"] for row in audits] == [
         "сохранение геометрии маршрута", "сброс геометрии маршрута"
     ]
+    summaries = []
     for row in audits:
         assert row["object_id"] == str(route_id)
-        assert "coordinates" not in (row["old_value"] or "")
-        assert "coordinates" not in (row["new_value"] or "")
-    saved_summary = json.loads(audits[0]["new_value"])
-    deleted_summary = json.loads(audits[1]["old_value"])
+        summaries.extend([
+            json.loads(value)
+            for value in (row["old_value"], row["new_value"])
+        ])
+    absent = {
+        "direction": "forward", "source": None, "version": 0,
+        "coordinates": 0,
+    }
+    saved_summary = summaries[1]
+    deleted_summary = summaries[2]
+    assert summaries[0] == absent
     assert saved_summary == {
         "direction": "forward", "source": "manual", "version": 1,
-        "coordinate_count": 3,
+        "coordinates": 3,
     }
     assert deleted_summary == saved_summary
+    assert summaries[3] == absent
+    assert all("geometry" not in summary for summary in summaries)
+    assert all(isinstance(summary["coordinates"], int) for summary in summaries)
 
 
 def test_save_and_delete_geometry_domain_lifecycle_without_implicit_commit(
@@ -743,12 +754,20 @@ def test_save_and_delete_geometry_domain_lifecycle_without_implicit_commit(
         assert old["version"] == 1
         assert updated["version"] == 2
         assert updated["source"] == "osrm"
+        assert con.execute(
+            "SELECT last_version FROM route_geometry_revisions "
+            "WHERE route_id=? AND direction='forward'", (route_id,)
+        ).fetchone()["last_version"] == 2
         con.commit()
 
         deleted = route_geometry.delete_geometry(con, route_id, "forward", 2)
         assert deleted == updated
         assert con.in_transaction
         assert get_geometry(con, route_id, "forward") is None
+        assert con.execute(
+            "SELECT last_version FROM route_geometry_revisions "
+            "WHERE route_id=? AND direction='forward'", (route_id,)
+        ).fetchone()["last_version"] == 2
     finally:
         con.close()
 
@@ -852,13 +871,17 @@ def test_save_and_delete_detect_zero_rowcount_races(tmp_path, monkeypatch):
         )
         con.commit()
 
-        with pytest.raises(GeometryVersionConflict):
+        with pytest.raises(
+            GeometryVersionConflict, match="изменена другим пользователем"
+        ):
             route_geometry.save_geometry(
                 RaceConnection(con, "UPDATE route_geometries"),
                 route_id, "forward", geometry, "manual", 1,
                 "admin", "second",
             )
-        with pytest.raises(GeometryVersionConflict):
+        with pytest.raises(
+            GeometryVersionConflict, match="изменена другим пользователем"
+        ):
             route_geometry.delete_geometry(
                 RaceConnection(con, "DELETE FROM route_geometries"),
                 route_id, "forward", 1,
@@ -885,7 +908,9 @@ def test_save_maps_concurrent_unique_insert_to_version_conflict(tmp_path, monkey
         _insert_route_stop(con, route_id, 1, 30, 50)
         _insert_route_stop(con, route_id, 2, 31, 51)
 
-        with pytest.raises(GeometryVersionConflict):
+        with pytest.raises(
+            GeometryVersionConflict, match="Версия геометрии изменилась"
+        ):
             route_geometry.save_geometry(
                 InsertRaceConnection(con), route_id, "forward",
                 _geometry([[30, 50], [31, 51]]), "manual", 0,
@@ -1012,3 +1037,83 @@ def test_save_propagates_unrelated_insert_integrity_error(tmp_path, monkeypatch)
         assert get_geometry(con, route_id, "forward") is None
     finally:
         con.close()
+
+
+def test_geometry_versions_do_not_repeat_after_delete_and_recreate(geometry_api):
+    client = geometry_api["client"]
+    route_id = geometry_api["route_id"]
+    first = _put_geometry(
+        client, route_id, "forward", geometry_api["forward"], 0
+    )
+    assert first.status_code == 200, first.text
+    assert first.json()["version"] == 1
+    deleted = _delete_geometry(client, route_id, "forward", 1)
+    assert deleted.status_code == 200, deleted.text
+
+    recreated = _put_geometry(
+        client, route_id, "forward", geometry_api["forward"], 0
+    )
+
+    assert recreated.status_code == 200, recreated.text
+    assert recreated.json()["version"] == 2
+    recreated_geometry = recreated.json()["geometry"]
+    stale = _put_geometry(
+        client,
+        route_id,
+        "forward",
+        [geometry_api["forward"][0], [30.5, 50.5],
+         geometry_api["forward"][1]],
+        1,
+    )
+    assert stale.status_code == 409
+    current = _stored_geometry(route_id, "forward")
+    assert current["version"] == 2
+    assert current["geometry"] == recreated_geometry
+
+
+def test_geometry_write_lock_prevents_route_delete_interleaving(
+    geometry_api, monkeypatch
+):
+    import threading
+    import app.api_route_network as route_api
+    from app import db
+
+    entered = threading.Event()
+    release = threading.Event()
+    original_route_or_404 = route_api._route_or_404
+
+    def paused_route_or_404(con, route_id):
+        entered.set()
+        if not release.wait(5):
+            raise RuntimeError("test route lookup was not released")
+        return original_route_or_404(con, route_id)
+
+    monkeypatch.setattr(route_api, "_route_or_404", paused_route_or_404)
+    result = {}
+
+    def save_request():
+        result["response"] = _put_geometry(
+            geometry_api["client"], geometry_api["route_id"], "forward",
+            geometry_api["forward"], 0,
+        )
+
+    worker = threading.Thread(target=save_request)
+    worker.start()
+    assert entered.wait(5)
+    competing = route_geometry.sqlite3.connect(db.DB_PATH, timeout=0.05)
+    competing.execute("PRAGMA foreign_keys=ON")
+    try:
+        with pytest.raises(route_geometry.sqlite3.OperationalError, match="locked"):
+            competing.execute(
+                "DELETE FROM routes WHERE id=?", (geometry_api["route_id"],)
+            )
+            competing.commit()
+    finally:
+        competing.rollback()
+        competing.close()
+        release.set()
+        worker.join(5)
+
+    assert not worker.is_alive()
+    assert result["response"].status_code == 200, result["response"].text
+    assert _stored_geometry(geometry_api["route_id"], "forward")["version"] == 1
