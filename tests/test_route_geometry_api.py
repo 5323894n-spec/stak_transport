@@ -3,6 +3,7 @@ import json
 from decimal import Decimal
 
 import pytest
+from fastapi.testclient import TestClient
 
 import app.route_geometry as route_geometry
 from app.route_geometry import (
@@ -383,5 +384,511 @@ def test_geometry_record_and_get_geometry_serialize_public_fields(
         assert geometry_record(row) == expected
         assert get_geometry(con, route_id, "backward") == expected
         assert get_geometry(con, route_id, "forward") is None
+    finally:
+        con.close()
+
+@pytest.fixture
+def geometry_api(tmp_path, monkeypatch):
+    from app import db
+    from app.auth import ensure_admin
+    from app.main import app
+
+    monkeypatch.setattr(db, "DB_PATH", str(tmp_path / "route-geometry-http.db"))
+    db.init_db()
+    con = db.connect()
+    try:
+        ensure_admin(con)
+    finally:
+        con.close()
+    client = TestClient(app)
+    token = client.post(
+        "/api/login", json={"username": "admin", "password": "admin"}
+    ).json()["token"]
+    client.headers.update({"Authorization": "Bearer " + token})
+    created = client.post(
+        "/api/refs/routes", json={"number": "G-API", "name": "Геометрия API"}
+    )
+    assert created.status_code == 200, created.text
+    route_id = created.json()["id"]
+    stops = []
+    for number, (longitude, latitude) in enumerate(
+        ((30.0, 50.0), (31.0, 51.0)), 1
+    ):
+        response = client.post("/api/stops", json={
+            "name": f"Точка {number}", "external_code": f"G{number}",
+            "longitude": longitude, "latitude": latitude,
+        })
+        assert response.status_code == 200, response.text
+        stops.append(response.json()["id"])
+    forward = [[30.0, 50.0], [31.0, 51.0]]
+    backward = list(reversed(forward))
+    for direction, ordered_stops in (
+        ("forward", stops), ("backward", list(reversed(stops)))
+    ):
+        response = client.put(
+            f"/api/routes/{route_id}/stops/{direction}",
+            json={"items": [
+                {"stop_id": stop_id, "sequence": sequence,
+                 "distance_from_prev_km": 0 if sequence == 1 else 1.4}
+                for sequence, stop_id in enumerate(ordered_stops, 1)
+            ]},
+        )
+        assert response.status_code == 200, response.text
+    return {"client": client, "route_id": route_id,
+            "forward": forward, "backward": backward}
+
+
+def _put_geometry(client, route_id, direction, coordinates, expected_version):
+    return client.put(
+        f"/api/routes/{route_id}/geometry/{direction}",
+        json={"geometry": _geometry(coordinates),
+              "expected_version": expected_version},
+    )
+
+
+def _delete_geometry(client, route_id, direction, expected_version):
+    return client.request(
+        "DELETE", f"/api/routes/{route_id}/geometry/{direction}",
+        json={"expected_version": expected_version},
+    )
+
+
+def _geometry_audits():
+    from app import db
+
+    con = db.connect()
+    try:
+        return [dict(row) for row in con.execute(
+            "SELECT * FROM audit_log "
+            "WHERE object_type='route_geometry' ORDER BY id"
+        )]
+    finally:
+        con.close()
+
+
+def _stored_geometry(route_id, direction):
+    from app import db
+
+    con = db.connect()
+    try:
+        return get_geometry(con, route_id, direction)
+    finally:
+        con.close()
+
+
+def test_geometry_api_first_put_and_network_read_are_compatible(geometry_api):
+    client = geometry_api["client"]
+    route_id = geometry_api["route_id"]
+    coordinates = [geometry_api["forward"][0], [30.5, 50.5],
+                   geometry_api["forward"][1]]
+
+    response = _put_geometry(client, route_id, "forward", coordinates, 0)
+
+    assert response.status_code == 200, response.text
+    assert response.json()["geometry"] == _geometry(coordinates)
+    assert response.json()["source"] == "manual"
+    assert response.json()["version"] == 1
+    network = client.get(f"/api/routes/{route_id}/network")
+    assert network.status_code == 200, network.text
+    body = network.json()
+    assert {"route", "forward", "backward", "totals", "warnings"} <= body.keys()
+    assert [row["stop"]["longitude"] for row in body["forward"]] == [30.0, 31.0]
+    assert body["geometries"]["forward"] == response.json()
+    assert body["geometries"]["backward"] is None
+
+
+def test_geometry_api_updates_versions_and_directions_independently(geometry_api):
+    client = geometry_api["client"]
+    route_id = geometry_api["route_id"]
+    assert _put_geometry(
+        client, route_id, "forward", geometry_api["forward"], 0
+    ).status_code == 200
+    updated_coordinates = [geometry_api["forward"][0], [30.25, 50.25],
+                           geometry_api["forward"][1]]
+
+    updated = _put_geometry(client, route_id, "forward", updated_coordinates, 1)
+    backward = _put_geometry(
+        client, route_id, "backward", geometry_api["backward"], 0
+    )
+
+    assert updated.status_code == 200, updated.text
+    assert updated.json()["version"] == 2
+    assert updated.json()["geometry"] == _geometry(updated_coordinates)
+    assert backward.status_code == 200, backward.text
+    assert backward.json()["version"] == 1
+    geometries = client.get(
+        f"/api/routes/{route_id}/network"
+    ).json()["geometries"]
+    assert geometries["forward"]["version"] == 2
+    assert geometries["backward"]["version"] == 1
+
+
+def test_stale_create_and_update_leave_geometry_and_audit_unchanged(geometry_api):
+    client = geometry_api["client"]
+    route_id = geometry_api["route_id"]
+
+    stale_create = _put_geometry(
+        client, route_id, "backward", geometry_api["backward"], 1
+    )
+    assert stale_create.status_code == 409
+    assert _stored_geometry(route_id, "backward") is None
+    assert _geometry_audits() == []
+
+    saved = _put_geometry(client, route_id, "forward", geometry_api["forward"], 0)
+    assert saved.status_code == 200, saved.text
+    before = _stored_geometry(route_id, "forward")
+    audits_before = _geometry_audits()
+    stale_update = _put_geometry(
+        client, route_id, "forward",
+        [geometry_api["forward"][0], [30.5, 50.5],
+         geometry_api["forward"][1]], 0,
+    )
+
+    assert stale_update.status_code == 409
+    assert _stored_geometry(route_id, "forward") == before
+    assert _geometry_audits() == audits_before
+
+
+def test_delete_requires_current_version_and_returns_network_null(geometry_api):
+    client = geometry_api["client"]
+    route_id = geometry_api["route_id"]
+    saved = _put_geometry(client, route_id, "forward", geometry_api["forward"], 0)
+    assert saved.status_code == 200, saved.text
+
+    stale = _delete_geometry(client, route_id, "forward", 0)
+    assert stale.status_code == 409
+    assert _stored_geometry(route_id, "forward")["version"] == 1
+    audits_after_stale = _geometry_audits()
+    deleted = _delete_geometry(client, route_id, "forward", 1)
+
+    assert deleted.status_code == 200, deleted.text
+    assert deleted.json() == {"ok": True, "direction": "forward"}
+    network = client.get(f"/api/routes/{route_id}/network").json()
+    assert network["geometries"]["forward"] is None
+    assert len(_geometry_audits()) == len(audits_after_stale) + 1
+
+
+@pytest.mark.parametrize("method", ["PUT", "DELETE"])
+def test_geometry_api_rejects_invalid_direction(geometry_api, method):
+    client = geometry_api["client"]
+    payload = {"expected_version": 0}
+    if method == "PUT":
+        payload["geometry"] = _geometry(geometry_api["forward"])
+
+    response = client.request(
+        method,
+        f"/api/routes/{geometry_api['route_id']}/geometry/sideways",
+        json=payload,
+    )
+
+    assert response.status_code == 400
+    assert "направ" in response.json()["detail"].lower()
+    assert _geometry_audits() == []
+
+
+@pytest.mark.parametrize("method", ["PUT", "DELETE"])
+@pytest.mark.parametrize("expected_version", [None, True, -1, 1.5, "1"])
+def test_geometry_api_rejects_invalid_expected_version(
+    geometry_api, method, expected_version
+):
+    client = geometry_api["client"]
+    route_id = geometry_api["route_id"]
+    payload = {}
+    if expected_version is not None:
+        payload["expected_version"] = expected_version
+    if method == "PUT":
+        payload["geometry"] = _geometry(geometry_api["forward"])
+
+    response = client.request(
+        method, f"/api/routes/{route_id}/geometry/forward", json=payload
+    )
+
+    assert response.status_code == 400
+    assert "верс" in response.json()["detail"].lower()
+    assert _stored_geometry(route_id, "forward") is None
+    assert _geometry_audits() == []
+
+
+@pytest.mark.parametrize("geometry", [
+    {"type": "Polygon", "coordinates": [[30, 50], [31, 51]]},
+    _geometry([[30, 50], [30.5, 50.5]]),
+])
+def test_geometry_api_rejects_invalid_geojson_or_anchor(geometry_api, geometry):
+    client = geometry_api["client"]
+    route_id = geometry_api["route_id"]
+
+    response = client.put(
+        f"/api/routes/{route_id}/geometry/forward",
+        json={"geometry": geometry, "expected_version": 0},
+    )
+
+    assert response.status_code == 400
+    assert _stored_geometry(route_id, "forward") is None
+    assert _geometry_audits() == []
+
+
+@pytest.mark.parametrize("method", ["PUT", "DELETE"])
+def test_geometry_api_returns_route_not_found_without_writes(geometry_api, method):
+    client = geometry_api["client"]
+    payload = {"expected_version": 0}
+    if method == "PUT":
+        payload["geometry"] = _geometry(geometry_api["forward"])
+
+    response = client.request(
+        method, "/api/routes/999999/geometry/forward", json=payload
+    )
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Маршрут не найден"
+    assert _geometry_audits() == []
+
+
+@pytest.mark.parametrize("method", ["PUT", "DELETE"])
+def test_read_only_role_cannot_change_geometry(geometry_api, method):
+    from app import db
+    from app.auth import hash_password
+
+    con = db.connect()
+    try:
+        con.execute(
+            "INSERT INTO users(username,password_hash,full_name,role,active) "
+            "VALUES(?,?,?,?,1)",
+            ("geometry-viewer", hash_password("secret"),
+             "Наблюдатель", "руководитель"),
+        )
+        con.commit()
+    finally:
+        con.close()
+    viewer = TestClient(geometry_api["client"].app)
+    token = viewer.post(
+        "/api/login",
+        json={"username": "geometry-viewer", "password": "secret"},
+    ).json()["token"]
+    viewer.headers.update({"Authorization": "Bearer " + token})
+    payload = {"expected_version": 0}
+    if method == "PUT":
+        payload["geometry"] = _geometry(geometry_api["forward"])
+
+    response = viewer.request(
+        method,
+        f"/api/routes/{geometry_api['route_id']}/geometry/forward",
+        json=payload,
+    )
+
+    assert response.status_code == 403
+    assert _stored_geometry(geometry_api["route_id"], "forward") is None
+    assert _geometry_audits() == []
+
+
+def test_successful_geometry_audits_only_contain_summaries(geometry_api):
+    client = geometry_api["client"]
+    route_id = geometry_api["route_id"]
+    coordinates = [geometry_api["forward"][0], [30.5, 50.5],
+                   geometry_api["forward"][1]]
+    saved = _put_geometry(client, route_id, "forward", coordinates, 0)
+    assert saved.status_code == 200, saved.text
+    deleted = _delete_geometry(client, route_id, "forward", 1)
+    assert deleted.status_code == 200, deleted.text
+
+    audits = _geometry_audits()
+
+    assert [row["action"] for row in audits] == [
+        "сохранение геометрии маршрута", "сброс геометрии маршрута"
+    ]
+    for row in audits:
+        assert row["object_id"] == str(route_id)
+        assert "coordinates" not in (row["old_value"] or "")
+        assert "coordinates" not in (row["new_value"] or "")
+    saved_summary = json.loads(audits[0]["new_value"])
+    deleted_summary = json.loads(audits[1]["old_value"])
+    assert saved_summary == {
+        "direction": "forward", "source": "manual", "version": 1,
+        "coordinate_count": 3,
+    }
+    assert deleted_summary == saved_summary
+
+
+def test_save_and_delete_geometry_domain_lifecycle_without_implicit_commit(
+    tmp_path, monkeypatch
+):
+    con = _open_route_db(tmp_path, monkeypatch)
+    try:
+        route_id = _insert_route(con)
+        _insert_route_stop(con, route_id, 1, 30, 50)
+        _insert_route_stop(con, route_id, 2, 31, 51)
+        con.commit()
+        geometry = _geometry([[30, 50], [30.5, 50.5], [31, 51]])
+
+        old, saved = route_geometry.save_geometry(
+            con, route_id, "forward", geometry, "manual", 0,
+            "admin", "2026-07-29T12:00:00",
+        )
+
+        assert old is None
+        assert saved["version"] == 1
+        assert con.in_transaction
+        stored_json = con.execute(
+            "SELECT geometry_json FROM route_geometries WHERE route_id=?",
+            (route_id,),
+        ).fetchone()["geometry_json"]
+        assert stored_json == json.dumps(
+            saved["geometry"], ensure_ascii=False, separators=(",", ":")
+        )
+        con.commit()
+
+        old, updated = route_geometry.save_geometry(
+            con, route_id, "forward", geometry, "osrm", 1,
+            "admin", "2026-07-29T12:01:00",
+        )
+        assert old["version"] == 1
+        assert updated["version"] == 2
+        assert updated["source"] == "osrm"
+        con.commit()
+
+        deleted = route_geometry.delete_geometry(con, route_id, "forward", 2)
+        assert deleted == updated
+        assert con.in_transaction
+        assert get_geometry(con, route_id, "forward") is None
+    finally:
+        con.close()
+
+
+@pytest.mark.parametrize("function_name", ["save_geometry", "delete_geometry"])
+@pytest.mark.parametrize("expected_version", [True, -1, 1.5, "1", None])
+def test_geometry_domain_rejects_invalid_expected_version(
+    tmp_path, monkeypatch, function_name, expected_version
+):
+    con = _open_route_db(tmp_path, monkeypatch)
+    try:
+        route_id = _insert_route(con)
+        _insert_route_stop(con, route_id, 1, 30, 50)
+        _insert_route_stop(con, route_id, 2, 31, 51)
+        function = getattr(route_geometry, function_name)
+
+        with pytest.raises(GeometryValidationError, match="верс"):
+            if function_name == "save_geometry":
+                function(
+                    con, route_id, "forward", _geometry([[30, 50], [31, 51]]),
+                    "manual", expected_version, "admin", "now",
+                )
+            else:
+                function(con, route_id, "forward", expected_version)
+    finally:
+        con.close()
+
+
+@pytest.mark.parametrize("direction", ["", "sideways", None])
+def test_geometry_domain_rejects_invalid_direction(tmp_path, monkeypatch, direction):
+    con = _open_route_db(tmp_path, monkeypatch)
+    try:
+        route_id = _insert_route(con)
+        with pytest.raises(GeometryValidationError, match="Направление"):
+            route_geometry.delete_geometry(con, route_id, direction, 0)
+    finally:
+        con.close()
+
+
+def test_save_geometry_rejects_invalid_source(tmp_path, monkeypatch):
+    con = _open_route_db(tmp_path, monkeypatch)
+    try:
+        route_id = _insert_route(con)
+        with pytest.raises(GeometryValidationError, match="Источник"):
+            route_geometry.save_geometry(
+                con, route_id, "forward", _geometry([[30, 50], [31, 51]]),
+                "import", 0, "admin", "now",
+            )
+    finally:
+        con.close()
+
+
+def test_geometry_domain_conflict_does_not_mutate_current_row(tmp_path, monkeypatch):
+    con = _open_route_db(tmp_path, monkeypatch)
+    try:
+        route_id = _insert_route(con)
+        _insert_route_stop(con, route_id, 1, 30, 50)
+        _insert_route_stop(con, route_id, 2, 31, 51)
+        route_geometry.save_geometry(
+            con, route_id, "forward", _geometry([[30, 50], [31, 51]]),
+            "manual", 0, "admin", "first",
+        )
+        con.commit()
+        before = get_geometry(con, route_id, "forward")
+
+        with pytest.raises(GeometryVersionConflict, match="Версия"):
+            route_geometry.save_geometry(
+                con, route_id, "forward",
+                _geometry([[30, 50], [30.5, 50.5], [31, 51]]),
+                "manual", 0, "admin", "second",
+            )
+        assert get_geometry(con, route_id, "forward") == before
+
+        with pytest.raises(GeometryVersionConflict, match="Версия"):
+            route_geometry.delete_geometry(con, route_id, "forward", 0)
+        assert get_geometry(con, route_id, "forward") == before
+    finally:
+        con.close()
+
+
+def test_save_and_delete_detect_zero_rowcount_races(tmp_path, monkeypatch):
+    class RaceConnection:
+        def __init__(self, con, blocked_statement):
+            self.con = con
+            self.blocked_statement = blocked_statement
+
+        def execute(self, statement, parameters=()):
+            if statement.strip().startswith(self.blocked_statement):
+                return type("ZeroRowCursor", (), {"rowcount": 0})()
+            return self.con.execute(statement, parameters)
+
+    con = _open_route_db(tmp_path, monkeypatch)
+    try:
+        route_id = _insert_route(con)
+        _insert_route_stop(con, route_id, 1, 30, 50)
+        _insert_route_stop(con, route_id, 2, 31, 51)
+        geometry = _geometry([[30, 50], [31, 51]])
+        route_geometry.save_geometry(
+            con, route_id, "forward", geometry, "manual", 0,
+            "admin", "first",
+        )
+        con.commit()
+
+        with pytest.raises(GeometryVersionConflict):
+            route_geometry.save_geometry(
+                RaceConnection(con, "UPDATE route_geometries"),
+                route_id, "forward", geometry, "manual", 1,
+                "admin", "second",
+            )
+        with pytest.raises(GeometryVersionConflict):
+            route_geometry.delete_geometry(
+                RaceConnection(con, "DELETE FROM route_geometries"),
+                route_id, "forward", 1,
+            )
+        assert get_geometry(con, route_id, "forward")["version"] == 1
+    finally:
+        con.close()
+
+
+def test_save_maps_concurrent_unique_insert_to_version_conflict(tmp_path, monkeypatch):
+    class InsertRaceConnection:
+        def __init__(self, con):
+            self.con = con
+
+        def execute(self, statement, parameters=()):
+            if statement.strip().startswith("INSERT INTO route_geometries"):
+                raise route_geometry.sqlite3.IntegrityError("UNIQUE constraint failed")
+            return self.con.execute(statement, parameters)
+
+    con = _open_route_db(tmp_path, monkeypatch)
+    try:
+        route_id = _insert_route(con)
+        _insert_route_stop(con, route_id, 1, 30, 50)
+        _insert_route_stop(con, route_id, 2, 31, 51)
+
+        with pytest.raises(GeometryVersionConflict):
+            route_geometry.save_geometry(
+                InsertRaceConnection(con), route_id, "forward",
+                _geometry([[30, 50], [31, 51]]), "manual", 0,
+                "admin", "now",
+            )
     finally:
         con.close()

@@ -2,6 +2,7 @@
 """Доменная валидация и чтение геометрии маршрута."""
 import json
 import math
+import sqlite3
 from numbers import Number
 
 
@@ -191,3 +192,134 @@ def get_geometry(con, route_id, direction):
         (route_id, direction),
     ).fetchone()
     return geometry_record(row)
+
+
+def _validate_direction(direction):
+    if direction not in DIRECTIONS:
+        raise GeometryValidationError(
+            "Направление должно быть forward или backward."
+        )
+
+
+def _validate_expected_version(expected_version):
+    if (
+        isinstance(expected_version, bool)
+        or not isinstance(expected_version, int)
+        or expected_version < 0
+    ):
+        raise GeometryValidationError(
+            "Ожидаемая версия геометрии должна быть целым неотрицательным числом."
+        )
+
+
+def _current_geometry_row(con, route_id, direction):
+    return con.execute(
+        """
+        SELECT id, geometry_json, source, version, updated_by, updated_at
+        FROM route_geometries
+        WHERE route_id=? AND direction=?
+        """,
+        (route_id, direction),
+    ).fetchone()
+
+
+def _version_conflict(expected_version, actual_version):
+    return GeometryVersionConflict(
+        "Версия геометрии изменилась: "
+        f"ожидалась {expected_version}, текущая {actual_version}."
+    )
+
+
+def save_geometry(
+    con,
+    route_id,
+    direction,
+    geometry,
+    source,
+    expected_version,
+    username,
+    timestamp,
+):
+    """Сохранить геометрию с оптимистичной блокировкой без commit."""
+    _validate_direction(direction)
+    if source not in ("manual", "osrm"):
+        raise GeometryValidationError(
+            "Источник геометрии должен быть manual или osrm."
+        )
+    _validate_expected_version(expected_version)
+    normalized = validate_geometry(
+        geometry, stop_anchors(con, route_id, direction)
+    )
+    current = _current_geometry_row(con, route_id, direction)
+    actual_version = current["version"] if current else 0
+    if expected_version != actual_version:
+        raise _version_conflict(expected_version, actual_version)
+
+    serialized = json.dumps(
+        normalized, ensure_ascii=False, separators=(",", ":")
+    )
+    old_record = geometry_record(current)
+    new_version = actual_version + 1
+    if current:
+        cursor = con.execute(
+            """
+            UPDATE route_geometries
+            SET geometry_json=?, source=?, version=?, updated_by=?, updated_at=?
+            WHERE id=? AND version=?
+            """,
+            (
+                serialized,
+                source,
+                new_version,
+                username,
+                timestamp,
+                current["id"],
+                actual_version,
+            ),
+        )
+        if cursor.rowcount != 1:
+            raise _version_conflict(expected_version, actual_version)
+    else:
+        try:
+            con.execute(
+                """
+                INSERT INTO route_geometries(
+                  route_id, direction, geometry_json, source, version,
+                  updated_by, created_at, updated_at
+                ) VALUES(?, ?, ?, ?, 1, ?, ?, ?)
+                """,
+                (
+                    route_id,
+                    direction,
+                    serialized,
+                    source,
+                    username,
+                    timestamp,
+                    timestamp,
+                ),
+            )
+        except sqlite3.IntegrityError as exc:
+            raise _version_conflict(expected_version, actual_version) from exc
+
+    return old_record, get_geometry(con, route_id, direction)
+
+
+def delete_geometry(con, route_id, direction, expected_version):
+    """Удалить геометрию с оптимистичной блокировкой без commit."""
+    _validate_direction(direction)
+    _validate_expected_version(expected_version)
+    current = _current_geometry_row(con, route_id, direction)
+    actual_version = current["version"] if current else 0
+    if expected_version != actual_version:
+        raise _version_conflict(expected_version, actual_version)
+    if current is None:
+        return None
+
+    old_record = geometry_record(current)
+    cursor = con.execute(
+        "DELETE FROM route_geometries WHERE id=? AND version=?",
+        (current["id"], actual_version),
+    )
+    if cursor.rowcount != 1:
+        raise _version_conflict(expected_version, actual_version)
+    return old_record

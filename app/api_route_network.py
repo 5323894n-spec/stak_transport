@@ -15,6 +15,10 @@ from .auth import current_user, require_write
 from .route_import import apply_import_plan, build_import_plan, parse_network_file
 from .route_network import recalculate_trace
 from .route_migration import migrate_route
+from .route_geometry import (
+    GeometryValidationError, GeometryVersionConflict, delete_geometry,
+    get_geometry, save_geometry,
+)
 
 
 router = APIRouter(prefix="/api")
@@ -226,6 +230,10 @@ def route_network(route_id: int, user=Depends(current_user)):
             "route": route,
             "forward": forward,
             "backward": backward,
+            "geometries": {
+                "forward": get_geometry(con, route_id, "forward"),
+                "backward": get_geometry(con, route_id, "backward"),
+            },
             "totals": {
                 "forward_km": forward[-1]["cumulative_km"] if forward else 0,
                 "backward_km": backward[-1]["cumulative_km"] if backward else 0,
@@ -587,5 +595,94 @@ def route_osrm_apply(route_id: int, direction: str, payload: dict = Body(...),
         )
         con.commit()
         return {"ok": True, "direction": direction, "total_km": cumulative}
+    finally:
+        con.close()
+
+
+def _geometry_summary(direction, record):
+    if record is None:
+        return None
+    return {
+        "direction": direction,
+        "source": record["source"],
+        "version": record["version"],
+        "coordinate_count": len(record["geometry"]["coordinates"]),
+    }
+
+
+@router.put("/routes/{route_id}/geometry/{direction}")
+def route_geometry_save(
+    route_id: int,
+    direction: str,
+    payload: dict = Body(...),
+    user=Depends(current_user),
+):
+    require_write(user, "routes")
+    con = db.connect()
+    try:
+        _route_or_404(con, route_id)
+        try:
+            old, saved = save_geometry(
+                con,
+                route_id,
+                direction,
+                payload.get("geometry"),
+                "manual",
+                payload.get("expected_version"),
+                user["username"],
+                _now(),
+            )
+        except GeometryValidationError as exc:
+            con.rollback()
+            raise HTTPException(400, str(exc)) from exc
+        except GeometryVersionConflict as exc:
+            con.rollback()
+            raise HTTPException(409, str(exc)) from exc
+        db.audit(
+            con,
+            user["username"],
+            "сохранение геометрии маршрута",
+            "route_geometry",
+            route_id,
+            old=_geometry_summary(direction, old),
+            new=_geometry_summary(direction, saved),
+        )
+        con.commit()
+        return saved
+    finally:
+        con.close()
+
+
+@router.delete("/routes/{route_id}/geometry/{direction}")
+def route_geometry_delete(
+    route_id: int,
+    direction: str,
+    payload: dict = Body(...),
+    user=Depends(current_user),
+):
+    require_write(user, "routes")
+    con = db.connect()
+    try:
+        _route_or_404(con, route_id)
+        try:
+            old = delete_geometry(
+                con, route_id, direction, payload.get("expected_version")
+            )
+        except GeometryValidationError as exc:
+            con.rollback()
+            raise HTTPException(400, str(exc)) from exc
+        except GeometryVersionConflict as exc:
+            con.rollback()
+            raise HTTPException(409, str(exc)) from exc
+        db.audit(
+            con,
+            user["username"],
+            "сброс геометрии маршрута",
+            "route_geometry",
+            route_id,
+            old=_geometry_summary(direction, old),
+        )
+        con.commit()
+        return {"ok": True, "direction": direction}
     finally:
         con.close()
