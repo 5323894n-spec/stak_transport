@@ -18,6 +18,7 @@ from .route_migration import migrate_route
 from .route_geometry import (
     GeometryValidationError, GeometryVersionConflict, delete_geometry,
     get_geometry, normalize_osrm_geometry, save_geometry, stop_anchors,
+    synchronize_stop_anchor,
 )
 
 
@@ -289,10 +290,16 @@ def route_stops_replace(route_id: int, direction: str, payload: dict = Body(...)
 
     con = db.connect()
     try:
+        con.execute("BEGIN IMMEDIATE")
         _route_or_404(con, route_id)
         for item in items:
             _stop_or_404(con, int(item["stop_id"]))
         old = _direction_rows(con, route_id, direction)
+        old_geometry = get_geometry(con, route_id, direction)
+        if old_geometry is not None:
+            delete_geometry(
+                con, route_id, direction, old_geometry["version"]
+            )
         con.execute("DELETE FROM route_stops WHERE route_id=? AND direction=?",
                     (route_id, direction))
         timestamp = _now()
@@ -326,19 +333,39 @@ def route_stops_replace(route_id: int, direction: str, payload: dict = Body(...)
             f"UPDATE routes SET {names_field}=?, {length_field}=? WHERE id=?",
             (names, total, route_id),
         )
-        db.audit(con, user["username"], "замена трассы маршрута", "routes", route_id,
-                 old={direction: old}, new={direction: saved})
+        db.audit(
+            con,
+            user["username"],
+            "замена трассы маршрута",
+            "routes",
+            route_id,
+            old={
+                direction: old,
+                "geometry": _geometry_summary(direction, old_geometry),
+            },
+            new={
+                direction: saved,
+                "geometry": _geometry_summary(direction, None),
+            },
+        )
         con.commit()
         return {"ok": True, "direction": direction, "items": saved, "total_km": total}
     except (KeyError, TypeError, ValueError) as exc:
+        con.rollback()
         raise HTTPException(400, str(exc))
+    except Exception:
+        con.rollback()
+        raise
     finally:
         con.close()
+
+
 @router.put("/stops/{stop_id}")
 def stop_update(stop_id: int, payload: dict = Body(...), user=Depends(current_user)):
     require_write(user, "routes")
     con = db.connect()
     try:
+        con.execute("BEGIN IMMEDIATE")
         old = _stop_or_404(con, stop_id)
         values = {field: payload.get(field) for field in STOP_FIELDS if field in payload}
         if not values:
@@ -358,23 +385,45 @@ def stop_update(stop_id: int, payload: dict = Body(...), user=Depends(current_us
                 values[field] = _coordinate_value(
                     values[field], label, lower, upper
                 )
-        values["updated_at"] = _now()
+        timestamp = _now()
+        values["updated_at"] = timestamp
+        old_coordinate = (old.get("longitude"), old.get("latitude"))
+        new_coordinate = (
+            values.get("longitude", old.get("longitude")),
+            values.get("latitude", old.get("latitude")),
+        )
         fields = list(values)
         con.execute(
             f"UPDATE stops SET {','.join(field + '=?' for field in fields)} WHERE id=?",
             [values[field] for field in fields] + [stop_id],
         )
+        geometry_changes = []
+        if new_coordinate != old_coordinate:
+            geometry_changes = synchronize_stop_anchor(
+                con,
+                stop_id,
+                old_coordinate,
+                new_coordinate,
+                user["username"],
+                timestamp,
+            )
+        audit_new = dict(values)
+        if geometry_changes:
+            audit_new["geometry_changes"] = geometry_changes
         db.audit(
             con, user["username"], "изменение остановки", "stops", stop_id,
-            old={field: old.get(field) for field in fields}, new=values,
+            old={field: old.get(field) for field in fields}, new=audit_new,
         )
         con.commit()
         return {"ok": True}
     except sqlite3.IntegrityError:
+        con.rollback()
         raise HTTPException(400, "Код остановки уже используется")
+    except Exception:
+        con.rollback()
+        raise
     finally:
         con.close()
-
 
 @router.post("/routes/{route_id}/migrate-network")
 def route_network_migrate(route_id: int, user=Depends(current_user)):

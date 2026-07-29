@@ -523,6 +523,44 @@ def test_geometry_api_updates_versions_and_directions_independently(geometry_api
     assert geometries["backward"]["version"] == 1
 
 
+def test_stop_coordinate_move_updates_geometry_anchor_and_version(geometry_api):
+    client = geometry_api["client"]
+    route_id = geometry_api["route_id"]
+    coordinates = [geometry_api["forward"][0], [30.5, 50.5],
+                   geometry_api["forward"][1]]
+    saved = _put_geometry(client, route_id, "forward", coordinates, 0)
+    assert saved.status_code == 200, saved.text
+    stop_id = client.get(
+        f"/api/routes/{route_id}/network"
+    ).json()["forward"][0]["stop"]["id"]
+
+    response = client.put(
+        f"/api/stops/{stop_id}", json={"longitude": 30.25}
+    )
+
+    assert response.status_code == 200, response.text
+    updated = _stored_geometry(route_id, "forward")
+    assert updated["geometry"]["coordinates"] == [
+        [30.25, 50.0], [30.5, 50.5], [31.0, 51.0]
+    ]
+    assert updated["source"] == "manual"
+    assert updated["version"] == 2
+    from app import db
+    con = db.connect()
+    try:
+        audit_value = con.execute(
+            "SELECT new_value FROM audit_log WHERE object_type='stops' "
+            "AND object_id=? ORDER BY id DESC LIMIT 1", (str(stop_id),)
+        ).fetchone()["new_value"]
+    finally:
+        con.close()
+    audit_new = json.loads(audit_value)
+    assert audit_new["geometry_changes"][0]["old"]["version"] == 1
+    assert audit_new["geometry_changes"][0]["new"]["version"] == 2
+    assert audit_new["geometry_changes"][0]["new"]["coordinates"] == 3
+    assert "LineString" not in audit_value
+
+
 def test_stale_create_and_update_leave_geometry_and_audit_unchanged(geometry_api):
     client = geometry_api["client"]
     route_id = geometry_api["route_id"]
@@ -1117,3 +1155,408 @@ def test_geometry_write_lock_prevents_route_delete_interleaving(
     assert not worker.is_alive()
     assert result["response"].status_code == 200, result["response"].text
     assert _stored_geometry(geometry_api["route_id"], "forward")["version"] == 1
+
+def _create_geometry_stop(client, name, code, longitude, latitude):
+    response = client.post("/api/stops", json={
+        "name": name,
+        "external_code": code,
+        "longitude": longitude,
+        "latitude": latitude,
+    })
+    assert response.status_code == 200, response.text
+    return response.json()["id"]
+
+
+def _replace_trace(client, route_id, direction, stop_ids):
+    response = client.put(
+        f"/api/routes/{route_id}/stops/{direction}",
+        json={"items": [
+            {
+                "stop_id": stop_id,
+                "sequence": sequence,
+                "distance_from_prev_km": 0 if sequence == 1 else 1,
+            }
+            for sequence, stop_id in enumerate(stop_ids, 1)
+        ]},
+    )
+    assert response.status_code == 200, response.text
+    return response
+
+
+def test_partial_latitude_update_preserves_longitude_and_updates_anchor(geometry_api):
+    client = geometry_api["client"]
+    route_id = geometry_api["route_id"]
+    assert _put_geometry(
+        client, route_id, "forward", geometry_api["forward"], 0
+    ).status_code == 200
+    stop_id = client.get(
+        f"/api/routes/{route_id}/network"
+    ).json()["forward"][0]["stop"]["id"]
+
+    response = client.put(f"/api/stops/{stop_id}", json={"latitude": 49.75})
+
+    assert response.status_code == 200, response.text
+    network = client.get(f"/api/routes/{route_id}/network").json()
+    assert network["forward"][0]["stop"]["longitude"] == 30.0
+    assert network["forward"][0]["stop"]["latitude"] == 49.75
+    assert network["geometries"]["forward"]["geometry"]["coordinates"][0] == [
+        30.0, 49.75
+    ]
+    assert network["geometries"]["forward"]["version"] == 2
+
+
+def test_shared_stop_updates_every_stored_route_direction(geometry_api):
+    client = geometry_api["client"]
+    route_id = geometry_api["route_id"]
+    network = client.get(f"/api/routes/{route_id}/network").json()
+    shared_stop_id = network["forward"][0]["stop"]["id"]
+    for direction in ("forward", "backward"):
+        assert _put_geometry(
+            client, route_id, direction, geometry_api[direction], 0
+        ).status_code == 200
+
+    second_route = client.post(
+        "/api/refs/routes", json={"number": "G-API-2", "name": "Второй"}
+    )
+    assert second_route.status_code == 200, second_route.text
+    second_route_id = second_route.json()["id"]
+    other_stop_id = _create_geometry_stop(
+        client, "Другая", "G-OTHER", 32.0, 52.0
+    )
+    _replace_trace(
+        client, second_route_id, "forward", [shared_stop_id, other_stop_id]
+    )
+    assert _put_geometry(
+        client, second_route_id, "forward", [[30.0, 50.0], [32.0, 52.0]], 0
+    ).status_code == 200
+
+    response = client.put(
+        f"/api/stops/{shared_stop_id}", json={"latitude": 49.5}
+    )
+
+    assert response.status_code == 200, response.text
+    assert _stored_geometry(route_id, "forward")["geometry"]["coordinates"][0] == [30.0, 49.5]
+    assert _stored_geometry(route_id, "backward")["geometry"]["coordinates"][-1] == [30.0, 49.5]
+    assert _stored_geometry(second_route_id, "forward")["geometry"]["coordinates"][0] == [30.0, 49.5]
+    assert {
+        _stored_geometry(route_id, "forward")["version"],
+        _stored_geometry(route_id, "backward")["version"],
+        _stored_geometry(second_route_id, "forward")["version"],
+    } == {2}
+
+
+def test_repeated_stop_updates_only_its_ordered_anchor_occurrences(geometry_api):
+    client = geometry_api["client"]
+    route_id = geometry_api["route_id"]
+    network = client.get(f"/api/routes/{route_id}/network").json()
+    target_stop_id = network["forward"][0]["stop"]["id"]
+    final_stop_id = network["forward"][1]["stop"]["id"]
+    middle_stop_id = _create_geometry_stop(
+        client, "Средняя", "G-MIDDLE", 30.5, 50.5
+    )
+    _replace_trace(
+        client,
+        route_id,
+        "forward",
+        [target_stop_id, middle_stop_id, target_stop_id, final_stop_id],
+    )
+    coordinates = [
+        [30.0, 50.0], [30.5, 50.5], [30.0, 50.0],
+        [31.0, 51.0], [30.0, 50.0],
+    ]
+    assert _put_geometry(client, route_id, "forward", coordinates, 0).status_code == 200
+
+    response = client.put(
+        f"/api/stops/{target_stop_id}", json={"longitude": 29.75}
+    )
+
+    assert response.status_code == 200, response.text
+    updated = _stored_geometry(route_id, "forward")["geometry"]["coordinates"]
+    assert updated == [
+        [29.75, 50.0], [30.5, 50.5], [29.75, 50.0],
+        [31.0, 51.0], [30.0, 50.0],
+    ]
+
+
+def test_missing_coordinate_resets_affected_geometry_and_keeps_revision_monotonic(
+    geometry_api,
+):
+    client = geometry_api["client"]
+    route_id = geometry_api["route_id"]
+    network = client.get(f"/api/routes/{route_id}/network").json()
+    target_stop_id = network["forward"][0]["stop"]["id"]
+    other_stop_id = network["forward"][1]["stop"]["id"]
+    back_first = _create_geometry_stop(client, "Назад 1", "G-B1", 33.0, 53.0)
+    back_second = _create_geometry_stop(client, "Назад 2", "G-B2", 34.0, 54.0)
+    _replace_trace(client, route_id, "backward", [back_first, back_second])
+    assert _put_geometry(
+        client, route_id, "forward", geometry_api["forward"], 0
+    ).status_code == 200
+    assert _put_geometry(
+        client, route_id, "backward", [[33.0, 53.0], [34.0, 54.0]], 0
+    ).status_code == 200
+
+    response = client.put(
+        f"/api/stops/{target_stop_id}", json={"longitude": None}
+    )
+
+    assert response.status_code == 200, response.text
+    assert _stored_geometry(route_id, "forward") is None
+    assert _stored_geometry(route_id, "backward")["version"] == 1
+    restored = client.put(
+        f"/api/stops/{target_stop_id}", json={"longitude": 30.0}
+    )
+    assert restored.status_code == 200, restored.text
+    recreated = _put_geometry(
+        client, route_id, "forward", [[30.0, 50.0], [31.0, 51.0]], 0
+    )
+    assert recreated.status_code == 200, recreated.text
+    assert recreated.json()["version"] == 2
+    assert other_stop_id != target_stop_id
+
+
+def test_unmappable_stored_anchor_resets_safely(geometry_api):
+    from app import db
+
+    client = geometry_api["client"]
+    route_id = geometry_api["route_id"]
+    assert _put_geometry(
+        client, route_id, "forward", geometry_api["forward"], 0
+    ).status_code == 200
+    stop_id = client.get(
+        f"/api/routes/{route_id}/network"
+    ).json()["forward"][0]["stop"]["id"]
+    con = db.connect()
+    try:
+        con.execute(
+            "UPDATE route_geometries SET geometry_json=? "
+            "WHERE route_id=? AND direction='forward'",
+            (json.dumps(_geometry([[29.0, 49.0], [31.0, 51.0]])), route_id),
+        )
+        con.commit()
+    finally:
+        con.close()
+
+    response = client.put(
+        f"/api/stops/{stop_id}", json={"longitude": 30.25}
+    )
+
+    assert response.status_code == 200, response.text
+    assert _stored_geometry(route_id, "forward") is None
+
+
+def test_stop_update_without_coordinate_change_keeps_geometry_unchanged(geometry_api):
+    client = geometry_api["client"]
+    route_id = geometry_api["route_id"]
+    assert _put_geometry(
+        client, route_id, "forward", geometry_api["forward"], 0
+    ).status_code == 200
+    before = _stored_geometry(route_id, "forward")
+    stop_id = client.get(
+        f"/api/routes/{route_id}/network"
+    ).json()["forward"][0]["stop"]["id"]
+
+    response = client.put(
+        f"/api/stops/{stop_id}", json={"name": "Новое имя", "latitude": 50.0}
+    )
+
+    assert response.status_code == 200, response.text
+    assert _stored_geometry(route_id, "forward") == before
+
+
+def test_replacing_forward_trace_resets_only_forward_geometry_with_safe_audit(
+    geometry_api,
+):
+    from app import db
+
+    client = geometry_api["client"]
+    route_id = geometry_api["route_id"]
+    for direction in ("forward", "backward"):
+        assert _put_geometry(
+            client, route_id, direction, geometry_api[direction], 0
+        ).status_code == 200
+    network = client.get(f"/api/routes/{route_id}/network").json()
+    stop_ids = [row["stop"]["id"] for row in network["forward"]]
+
+    _replace_trace(client, route_id, "forward", stop_ids)
+
+    assert _stored_geometry(route_id, "forward") is None
+    assert _stored_geometry(route_id, "backward")["version"] == 1
+    con = db.connect()
+    try:
+        audit = dict(con.execute(
+            "SELECT old_value,new_value FROM audit_log "
+            "WHERE action='замена трассы маршрута' AND object_id=? "
+            "ORDER BY id DESC LIMIT 1",
+            (str(route_id),),
+        ).fetchone())
+    finally:
+        con.close()
+    old_value = json.loads(audit["old_value"])
+    new_value = json.loads(audit["new_value"])
+    assert old_value["geometry"] == {
+        "direction": "forward", "source": "manual", "version": 1,
+        "coordinates": 2,
+    }
+    assert new_value["geometry"] == {
+        "direction": "forward", "source": None, "version": 0,
+        "coordinates": 0,
+    }
+    assert "LineString" not in audit["old_value"]
+    assert "LineString" not in audit["new_value"]
+
+
+def test_failure_after_stop_geometry_sync_rolls_back_every_change(
+    geometry_api, monkeypatch
+):
+    from app import api_route_network, db
+
+    client = geometry_api["client"]
+    route_id = geometry_api["route_id"]
+    assert _put_geometry(
+        client, route_id, "forward", geometry_api["forward"], 0
+    ).status_code == 200
+    network = client.get(f"/api/routes/{route_id}/network").json()
+    stop_id = network["forward"][0]["stop"]["id"]
+    before_geometry = _stored_geometry(route_id, "forward")
+    con = db.connect()
+    try:
+        before_audits = con.execute("SELECT COUNT(*) FROM audit_log").fetchone()[0]
+        before_revision = con.execute(
+            "SELECT last_version FROM route_geometry_revisions "
+            "WHERE route_id=? AND direction='forward'", (route_id,)
+        ).fetchone()[0]
+    finally:
+        con.close()
+
+    def fail_audit(*args, **kwargs):
+        raise RuntimeError("injected audit failure")
+
+    monkeypatch.setattr(api_route_network.db, "audit", fail_audit)
+    with pytest.raises(RuntimeError, match="injected audit failure"):
+        client.put(f"/api/stops/{stop_id}", json={"longitude": 30.25})
+
+    assert _stored_geometry(route_id, "forward") == before_geometry
+    con = db.connect()
+    try:
+        stop = con.execute(
+            "SELECT longitude,latitude FROM stops WHERE id=?", (stop_id,)
+        ).fetchone()
+        assert (stop["longitude"], stop["latitude"]) == (30.0, 50.0)
+        assert con.execute("SELECT COUNT(*) FROM audit_log").fetchone()[0] == before_audits
+        assert con.execute(
+            "SELECT last_version FROM route_geometry_revisions "
+            "WHERE route_id=? AND direction='forward'", (route_id,)
+        ).fetchone()[0] == before_revision
+    finally:
+        con.close()
+
+def test_osrm_preview_is_stale_after_stop_coordinate_mutation(
+    geometry_api, monkeypatch
+):
+    import app.osrm as osrm
+
+    client = geometry_api["client"]
+    route_id = geometry_api["route_id"]
+    monkeypatch.setattr(osrm, "request_route", lambda coordinates, **kwargs: {
+        "geometry": _geometry([list(point) for point in coordinates]),
+        "legs": [{"distance": 1400, "duration": 120}],
+    })
+    preview = client.post(f"/api/routes/{route_id}/osrm/preview/forward")
+    assert preview.status_code == 200, preview.text
+    stop_id = client.get(
+        f"/api/routes/{route_id}/network"
+    ).json()["forward"][0]["stop"]["id"]
+    moved = client.put(
+        f"/api/stops/{stop_id}", json={"longitude": 30.25}
+    )
+    assert moved.status_code == 200, moved.text
+    before_apply = client.get(f"/api/routes/{route_id}/network").json()
+
+    response = client.post(
+        f"/api/routes/{route_id}/osrm/apply/forward",
+        json={
+            "preview_token": preview.json()["preview_token"],
+            "expected_geometry_version": 0,
+        },
+    )
+
+    assert response.status_code == 409, response.text
+    assert client.get(f"/api/routes/{route_id}/network").json() == before_apply
+
+def test_malformed_stored_geometry_json_resets_safely(geometry_api):
+    from app import db
+
+    client = geometry_api["client"]
+    route_id = geometry_api["route_id"]
+    assert _put_geometry(
+        client, route_id, "forward", geometry_api["forward"], 0
+    ).status_code == 200
+    stop_id = client.get(
+        f"/api/routes/{route_id}/network"
+    ).json()["forward"][0]["stop"]["id"]
+    con = db.connect()
+    try:
+        con.execute(
+            "UPDATE route_geometries SET geometry_json='not-json' "
+            "WHERE route_id=? AND direction='forward'",
+            (route_id,),
+        )
+        con.commit()
+    finally:
+        con.close()
+
+    response = client.put(
+        f"/api/stops/{stop_id}", json={"longitude": 30.25}
+    )
+
+    assert response.status_code == 200, response.text
+    assert _stored_geometry(route_id, "forward") is None
+
+def test_failure_after_trace_geometry_reset_rolls_back_trace_and_geometry(
+    geometry_api, monkeypatch
+):
+    from app import api_route_network, db
+
+    client = geometry_api["client"]
+    route_id = geometry_api["route_id"]
+    assert _put_geometry(
+        client, route_id, "forward", geometry_api["forward"], 0
+    ).status_code == 200
+    before = client.get(f"/api/routes/{route_id}/network").json()
+    stop_ids = [row["stop"]["id"] for row in before["forward"]]
+    con = db.connect()
+    try:
+        before_revision = con.execute(
+            "SELECT last_version FROM route_geometry_revisions "
+            "WHERE route_id=? AND direction='forward'", (route_id,)
+        ).fetchone()[0]
+    finally:
+        con.close()
+
+    def fail_audit(*args, **kwargs):
+        raise RuntimeError("injected trace audit failure")
+
+    monkeypatch.setattr(api_route_network.db, "audit", fail_audit)
+    with pytest.raises(RuntimeError, match="injected trace audit failure"):
+        client.put(
+            f"/api/routes/{route_id}/stops/forward",
+            json={"items": [
+                {
+                    "stop_id": stop_id,
+                    "sequence": sequence,
+                    "distance_from_prev_km": 0 if sequence == 1 else 1,
+                }
+                for sequence, stop_id in enumerate(stop_ids, 1)
+            ]},
+        )
+
+    assert client.get(f"/api/routes/{route_id}/network").json() == before
+    con = db.connect()
+    try:
+        assert con.execute(
+            "SELECT last_version FROM route_geometry_revisions "
+            "WHERE route_id=? AND direction='forward'", (route_id,)
+        ).fetchone()[0] == before_revision
+    finally:
+        con.close()

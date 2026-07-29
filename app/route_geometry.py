@@ -71,6 +71,26 @@ def _coordinates_match(first, second):
     )
 
 
+def ordered_anchor_indexes(coordinates, anchors):
+    """Find geometry vertex indexes for ordered normalized stop anchors."""
+    indexes = []
+    coordinate_index = 0
+    for anchor in anchors:
+        while (
+            coordinate_index < len(coordinates)
+            and not _coordinates_match(coordinates[coordinate_index], anchor)
+        ):
+            coordinate_index += 1
+        if coordinate_index == len(coordinates):
+            raise GeometryValidationError(
+                "Геометрия не проходит через все остановки маршрута "
+                "в заданном порядке."
+            )
+        indexes.append(coordinate_index)
+        coordinate_index += 1
+    return indexes
+
+
 def validate_geometry_shape(geometry):
     """Проверить структуру LineString и вернуть нормализованные координаты."""
     if not isinstance(geometry, dict) or geometry.get("type") != "LineString":
@@ -214,19 +234,7 @@ def validate_geometry(geometry, anchors):
         for number, anchor in enumerate(anchors, start=1)
     ]
 
-    coordinate_index = 0
-    for anchor in normalized_anchors:
-        while (
-            coordinate_index < len(coordinates)
-            and not _coordinates_match(coordinates[coordinate_index], anchor)
-        ):
-            coordinate_index += 1
-        if coordinate_index == len(coordinates):
-            raise GeometryValidationError(
-                "Геометрия не проходит через все остановки маршрута "
-                "в заданном порядке."
-            )
-        coordinate_index += 1
+    ordered_anchor_indexes(coordinates, normalized_anchors)
 
     return {"type": "LineString", "coordinates": coordinates}
 
@@ -445,6 +453,16 @@ def save_geometry(
     return old_record, get_geometry(con, route_id, direction)
 
 
+def _delete_geometry_row(con, route_id, direction, current):
+    cursor = con.execute(
+        "DELETE FROM route_geometries WHERE id=? AND version=?",
+        (current["id"], current["version"]),
+    )
+    if cursor.rowcount != 1:
+        raise _concurrent_change_conflict()
+    _remember_revision(con, route_id, direction, current["version"])
+
+
 def delete_geometry(con, route_id, direction, expected_version):
     """Удалить геометрию с оптимистичной блокировкой без commit."""
     _validate_direction(direction)
@@ -457,11 +475,130 @@ def delete_geometry(con, route_id, direction, expected_version):
         return None
 
     old_record = geometry_record(current)
-    cursor = con.execute(
-        "DELETE FROM route_geometries WHERE id=? AND version=?",
-        (current["id"], actual_version),
-    )
-    if cursor.rowcount != 1:
-        raise _concurrent_change_conflict()
-    _remember_revision(con, route_id, direction, actual_version)
+    _delete_geometry_row(con, route_id, direction, current)
     return old_record
+
+
+def _synchronization_summary(route_id, direction, record):
+    if record is None:
+        return {
+            "route_id": route_id,
+            "direction": direction,
+            "source": None,
+            "version": 0,
+            "coordinates": 0,
+        }
+    return {
+        "route_id": route_id,
+        "direction": direction,
+        "source": record["source"],
+        "version": record["version"],
+        "coordinates": len(record["geometry"]["coordinates"]),
+    }
+
+
+def synchronize_stop_anchor(
+    con, stop_id, old_coordinate, new_coordinate, username, timestamp
+):
+    """Align stored geometries after a stop coordinate update, without commit."""
+    affected = con.execute(
+        """
+        SELECT DISTINCT rg.route_id, rg.direction
+        FROM route_geometries AS rg
+        JOIN route_stops AS rs
+          ON rs.route_id=rg.route_id AND rs.direction=rg.direction
+        WHERE rs.stop_id=?
+        ORDER BY rg.route_id, rg.direction
+        """,
+        (stop_id,),
+    ).fetchall()
+    changes = []
+    coordinates_complete = (
+        old_coordinate is not None
+        and new_coordinate is not None
+        and len(old_coordinate) == 2
+        and len(new_coordinate) == 2
+        and None not in old_coordinate
+        and None not in new_coordinate
+    )
+
+    for affected_row in affected:
+        route_id = affected_row["route_id"]
+        direction = affected_row["direction"]
+        current_row = _current_geometry_row(con, route_id, direction)
+        if current_row is None:
+            continue
+        try:
+            current = geometry_record(current_row)
+        except (TypeError, ValueError):
+            old_summary = {
+                "route_id": route_id,
+                "direction": direction,
+                "source": current_row["source"],
+                "version": current_row["version"],
+                "coordinates": 0,
+            }
+            _delete_geometry_row(con, route_id, direction, current_row)
+            changes.append({
+                "old": old_summary,
+                "new": _synchronization_summary(route_id, direction, None),
+            })
+            continue
+        old_summary = _synchronization_summary(route_id, direction, current)
+        if not coordinates_complete:
+            delete_geometry(con, route_id, direction, current["version"])
+            changes.append({
+                "old": old_summary,
+                "new": _synchronization_summary(route_id, direction, None),
+            })
+            continue
+
+        try:
+            old_target = _normalize_coordinate(old_coordinate, 1)
+            new_target = _normalize_coordinate(new_coordinate, 1)
+            route_rows = con.execute(
+                """
+                SELECT rs.stop_id, s.longitude, s.latitude
+                FROM route_stops AS rs
+                JOIN stops AS s ON s.id=rs.stop_id
+                WHERE rs.route_id=? AND rs.direction=?
+                ORDER BY rs.sequence
+                """,
+                (route_id, direction),
+            ).fetchall()
+            old_anchors = []
+            target_anchor_indexes = []
+            for anchor_number, route_row in enumerate(route_rows, start=1):
+                if route_row["stop_id"] == stop_id:
+                    target_anchor_indexes.append(anchor_number - 1)
+                    old_anchors.append(old_target)
+                else:
+                    old_anchors.append(_normalize_coordinate(
+                        (route_row["longitude"], route_row["latitude"]),
+                        anchor_number,
+                    ))
+            geometry_coordinates = validate_geometry_shape(current["geometry"])
+            vertex_indexes = ordered_anchor_indexes(
+                geometry_coordinates, old_anchors
+            )
+            for anchor_index in target_anchor_indexes:
+                vertex_index = vertex_indexes[anchor_index]
+                geometry_coordinates[vertex_index] = list(new_target)
+            _, saved = save_geometry(
+                con,
+                route_id,
+                direction,
+                {"type": "LineString", "coordinates": geometry_coordinates},
+                "manual",
+                current["version"],
+                username,
+                timestamp,
+            )
+        except GeometryValidationError:
+            delete_geometry(con, route_id, direction, current["version"])
+            saved = None
+        changes.append({
+            "old": old_summary,
+            "new": _synchronization_summary(route_id, direction, saved),
+        })
+    return changes
