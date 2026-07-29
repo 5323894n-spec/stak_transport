@@ -134,6 +134,34 @@ def _direction_rows(con, route_id, direction):
     return result
 
 
+def _trace_snapshot(rows):
+    stops = []
+    for row in rows:
+        stop = row["stop"]
+        stops.append({
+            "route_stop_id": int(row["id"]),
+            "stop_id": int(stop["id"]),
+            "sequence": int(row["sequence"]),
+            "longitude": (
+                float(stop["longitude"])
+                if stop["longitude"] is not None else None
+            ),
+            "latitude": (
+                float(stop["latitude"])
+                if stop["latitude"] is not None else None
+            ),
+            "distance_from_prev_km": (
+                float(row["distance_from_prev_km"])
+                if row["distance_from_prev_km"] is not None else None
+            ),
+            "run_time_sec": (
+                int(row["run_time_sec"])
+                if row["run_time_sec"] is not None else None
+            ),
+        })
+    return {"segment_count": max(len(stops) - 1, 0), "stops": stops}
+
+
 @router.get("/stops")
 def stop_list(q: str = "", active: int | None = None, user=Depends(current_user)):
     con = db.connect()
@@ -533,6 +561,7 @@ def route_osrm_preview(route_id: int, direction: str, user=Depends(current_user)
             "diff": diff,
             "geometry": geometry,
             "expected_geometry_version": expected_geometry_version,
+            "trace_snapshot": _trace_snapshot(rows),
         }
         token = secrets.token_hex(16)
         created = datetime.datetime.now()
@@ -605,9 +634,17 @@ def route_osrm_apply(
                 409,
                 "Версия геометрии не совпадает с версией предпросмотра OSRM",
             )
+        current_trace = _trace_snapshot(
+            _direction_rows(con, route_id, direction)
+        )
+        if current_trace != plan.get("trace_snapshot"):
+            raise HTTPException(
+                409,
+                "Трасса маршрута изменилась после создания предпросмотра OSRM",
+            )
         timestamp = now.isoformat(timespec="seconds")
         for item in plan["diff"]:
-            con.execute(
+            cursor = con.execute(
                 "UPDATE route_stops SET distance_from_prev_km=?,run_time_sec=?,"
                 "distance_source='auto_osrm',updated_at=? "
                 "WHERE id=? AND route_id=? AND direction=?",
@@ -620,6 +657,10 @@ def route_osrm_apply(
                     direction,
                 ),
             )
+            if cursor.rowcount != 1:
+                raise GeometryVersionConflict(
+                    "Трасса маршрута изменилась во время применения OSRM"
+                )
         cumulative = 0.0
         rows = db.rows(con.execute(
             "SELECT id,distance_from_prev_km FROM route_stops "

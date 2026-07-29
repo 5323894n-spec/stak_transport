@@ -3,6 +3,7 @@
 import json
 import math
 import sqlite3
+from array import array
 from numbers import Number
 
 
@@ -10,6 +11,7 @@ DIRECTIONS = ("forward", "backward")
 ANCHOR_TOLERANCE = 0.000001
 MAX_COORDINATES = 20_000
 MAX_GEOMETRY_BYTES = 2 * 1024 * 1024
+MAX_OSRM_ASSIGNMENT_CELLS = 10_000_000
 
 
 class GeometryValidationError(ValueError):
@@ -111,6 +113,75 @@ def validate_geometry_shape(geometry):
     return normalized
 
 
+def _squared_displacement(coordinate, anchor):
+    return (
+        (coordinate[0] - anchor[0]) ** 2
+        + (coordinate[1] - anchor[1]) ** 2
+    )
+
+
+def _minimum_monotone_assignment(coordinates, anchors):
+    coordinate_count = len(coordinates)
+    anchor_count = len(anchors)
+    if not anchors:
+        return []
+    if anchor_count == coordinate_count:
+        return list(range(coordinate_count))
+    if anchor_count == 1:
+        return [min(
+            range(coordinate_count),
+            key=lambda index: _squared_displacement(coordinates[index], anchors[0]),
+        )]
+
+    cells = (anchor_count + 1) * (coordinate_count + 1)
+    if cells > MAX_OSRM_ASSIGNMENT_CELLS:
+        raise GeometryValidationError(
+            "Геометрия OSRM слишком сложна для привязки к остановкам маршрута."
+        )
+
+    suffix_costs = [None] * (anchor_count + 1)
+    suffix_costs[anchor_count] = array("d", [0.0]) * (coordinate_count + 1)
+    for anchor_index in range(anchor_count - 1, -1, -1):
+        row = array("d", [math.inf]) * (coordinate_count + 1)
+        next_row = suffix_costs[anchor_index + 1]
+        last_start = coordinate_count - (anchor_count - anchor_index)
+        anchor = anchors[anchor_index]
+        for coordinate_index in range(last_start, -1, -1):
+            assigned = (
+                _squared_displacement(
+                    coordinates[coordinate_index], anchor
+                )
+                + next_row[coordinate_index + 1]
+            )
+            skipped = row[coordinate_index + 1]
+            row[coordinate_index] = min(assigned, skipped)
+        suffix_costs[anchor_index] = row
+
+    assignment = []
+    cursor = 0
+    best_cost = suffix_costs[0][0]
+    for anchor_index, anchor in enumerate(anchors):
+        next_row = suffix_costs[anchor_index + 1]
+        last_candidate = coordinate_count - (anchor_count - anchor_index)
+        for coordinate_index in range(cursor, last_candidate + 1):
+            assigned = (
+                _squared_displacement(
+                    coordinates[coordinate_index], anchor
+                )
+                + next_row[coordinate_index + 1]
+            )
+            if assigned == best_cost:
+                assignment.append(coordinate_index)
+                cursor = coordinate_index + 1
+                best_cost = next_row[cursor]
+                break
+        else:
+            raise GeometryValidationError(
+                "Не удалось привязать геометрию OSRM к остановкам маршрута."
+            )
+    return assignment
+
+
 def normalize_osrm_geometry(geometry, anchors):
     """Привязать геометрию OSRM к точным координатам остановок."""
     coordinates = validate_geometry_shape(geometry)
@@ -123,19 +194,11 @@ def normalize_osrm_geometry(geometry, anchors):
             "Геометрия OSRM содержит меньше координат, чем остановок маршрута."
         )
 
-    cursor = 0
-    for index, anchor in enumerate(normalized_anchors):
-        remaining_anchors = len(normalized_anchors) - index - 1
-        last_candidate = len(coordinates) - remaining_anchors - 1
-        nearest = min(
-            range(cursor, last_candidate + 1),
-            key=lambda coordinate_index: (
-                (coordinates[coordinate_index][0] - anchor[0]) ** 2
-                + (coordinates[coordinate_index][1] - anchor[1]) ** 2
-            ),
-        )
-        coordinates[nearest] = [float(anchor[0]), float(anchor[1])]
-        cursor = nearest + 1
+    assignment = _minimum_monotone_assignment(
+        coordinates, normalized_anchors
+    )
+    for coordinate_index, anchor in zip(assignment, normalized_anchors):
+        coordinates[coordinate_index] = [float(anchor[0]), float(anchor[1])]
 
     return validate_geometry(
         {"type": "LineString", "coordinates": coordinates},
