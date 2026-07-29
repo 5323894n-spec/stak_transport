@@ -621,23 +621,16 @@ def route_geometry_save(
     con = db.connect()
     try:
         _route_or_404(con, route_id)
-        try:
-            old, saved = save_geometry(
-                con,
-                route_id,
-                direction,
-                payload.get("geometry"),
-                "manual",
-                payload.get("expected_version"),
-                user["username"],
-                _now(),
-            )
-        except GeometryValidationError as exc:
-            con.rollback()
-            raise HTTPException(400, str(exc)) from exc
-        except GeometryVersionConflict as exc:
-            con.rollback()
-            raise HTTPException(409, str(exc)) from exc
+        old, saved = save_geometry(
+            con,
+            route_id,
+            direction,
+            payload.get("geometry"),
+            "manual",
+            payload.get("expected_version"),
+            user["username"],
+            _now(),
+        )
         db.audit(
             con,
             user["username"],
@@ -649,6 +642,15 @@ def route_geometry_save(
         )
         con.commit()
         return saved
+    except GeometryValidationError as exc:
+        con.rollback()
+        raise HTTPException(400, str(exc)) from exc
+    except GeometryVersionConflict as exc:
+        con.rollback()
+        raise HTTPException(409, str(exc)) from exc
+    except Exception:
+        con.rollback()
+        raise
     finally:
         con.close()
 
@@ -664,16 +666,9 @@ def route_geometry_delete(
     con = db.connect()
     try:
         _route_or_404(con, route_id)
-        try:
-            old = delete_geometry(
-                con, route_id, direction, payload.get("expected_version")
-            )
-        except GeometryValidationError as exc:
-            con.rollback()
-            raise HTTPException(400, str(exc)) from exc
-        except GeometryVersionConflict as exc:
-            con.rollback()
-            raise HTTPException(409, str(exc)) from exc
+        old = delete_geometry(
+            con, route_id, direction, payload.get("expected_version")
+        )
         db.audit(
             con,
             user["username"],
@@ -684,5 +679,14 @@ def route_geometry_delete(
         )
         con.commit()
         return {"ok": True, "direction": direction}
+    except GeometryValidationError as exc:
+        con.rollback()
+        raise HTTPException(400, str(exc)) from exc
+    except GeometryVersionConflict as exc:
+        con.rollback()
+        raise HTTPException(409, str(exc)) from exc
+    except Exception:
+        con.rollback()
+        raise
     finally:
         con.close()

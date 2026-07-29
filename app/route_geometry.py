@@ -299,7 +299,12 @@ def save_geometry(
                 ),
             )
         except sqlite3.IntegrityError as exc:
-            raise _version_conflict(expected_version, actual_version) from exc
+            concurrent = _current_geometry_row(con, route_id, direction)
+            if concurrent is not None:
+                raise _version_conflict(
+                    expected_version, concurrent["version"]
+                ) from exc
+            raise
 
     return old_record, get_geometry(con, route_id, direction)
 

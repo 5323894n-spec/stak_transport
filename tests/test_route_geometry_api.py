@@ -875,6 +875,7 @@ def test_save_maps_concurrent_unique_insert_to_version_conflict(tmp_path, monkey
 
         def execute(self, statement, parameters=()):
             if statement.strip().startswith("INSERT INTO route_geometries"):
+                self.con.execute(statement, parameters)
                 raise route_geometry.sqlite3.IntegrityError("UNIQUE constraint failed")
             return self.con.execute(statement, parameters)
 
@@ -890,5 +891,124 @@ def test_save_maps_concurrent_unique_insert_to_version_conflict(tmp_path, monkey
                 _geometry([[30, 50], [31, 51]]), "manual", 0,
                 "admin", "now",
             )
+    finally:
+        con.close()
+
+
+class _TrackedGeometryConnection:
+    def __init__(self, con, fail_commit=False):
+        self._con = con
+        self._fail_commit = fail_commit
+        self.rollback_calls = 0
+
+    def __getattr__(self, name):
+        return getattr(self._con, name)
+
+    def commit(self):
+        if self._fail_commit:
+            raise RuntimeError("geometry commit failed")
+        return self._con.commit()
+
+    def rollback(self):
+        self.rollback_calls += 1
+        return self._con.rollback()
+
+
+def _track_endpoint_connection(monkeypatch, fail_commit=False):
+    from app import db
+
+    original_connect = db.connect
+    calls = 0
+    tracked = []
+
+    def connect():
+        nonlocal calls
+        calls += 1
+        con = original_connect()
+        if calls == 2:
+            proxy = _TrackedGeometryConnection(con, fail_commit=fail_commit)
+            tracked.append(proxy)
+            return proxy
+        return con
+
+    monkeypatch.setattr(db, "connect", connect)
+    return tracked
+
+
+def test_put_explicitly_rolls_back_when_audit_fails(geometry_api, monkeypatch):
+    from app import db
+
+    tracked = _track_endpoint_connection(monkeypatch)
+
+    def fail_audit(*args, **kwargs):
+        raise RuntimeError("geometry audit failed")
+
+    monkeypatch.setattr(db, "audit", fail_audit)
+    with pytest.raises(RuntimeError, match="geometry audit failed"):
+        _put_geometry(
+            geometry_api["client"], geometry_api["route_id"], "forward",
+            geometry_api["forward"], 0,
+        )
+
+    assert tracked[0].rollback_calls == 1
+    assert _stored_geometry(geometry_api["route_id"], "forward") is None
+    assert _geometry_audits() == []
+
+
+def test_put_explicitly_rolls_back_when_commit_fails(geometry_api, monkeypatch):
+    tracked = _track_endpoint_connection(monkeypatch, fail_commit=True)
+
+    with pytest.raises(RuntimeError, match="geometry commit failed"):
+        _put_geometry(
+            geometry_api["client"], geometry_api["route_id"], "forward",
+            geometry_api["forward"], 0,
+        )
+
+    assert tracked[0].rollback_calls == 1
+    assert _stored_geometry(geometry_api["route_id"], "forward") is None
+    assert _geometry_audits() == []
+
+
+def test_delete_explicitly_rolls_back_when_audit_fails(
+    geometry_api, monkeypatch
+):
+    from app import db
+
+    saved = _put_geometry(
+        geometry_api["client"], geometry_api["route_id"], "forward",
+        geometry_api["forward"], 0,
+    )
+    assert saved.status_code == 200, saved.text
+    before = _stored_geometry(geometry_api["route_id"], "forward")
+    audits_before = _geometry_audits()
+    tracked = _track_endpoint_connection(monkeypatch)
+
+    def fail_audit(*args, **kwargs):
+        raise RuntimeError("geometry audit failed")
+
+    monkeypatch.setattr(db, "audit", fail_audit)
+    with pytest.raises(RuntimeError, match="geometry audit failed"):
+        _delete_geometry(
+            geometry_api["client"], geometry_api["route_id"], "forward", 1
+        )
+
+    assert tracked[0].rollback_calls == 1
+    assert _stored_geometry(geometry_api["route_id"], "forward") == before
+    assert _geometry_audits() == audits_before
+
+
+def test_save_propagates_unrelated_insert_integrity_error(tmp_path, monkeypatch):
+    con = _open_route_db(tmp_path, monkeypatch)
+    try:
+        route_id = _insert_route(con)
+        _insert_route_stop(con, route_id, 1, 30, 50)
+        _insert_route_stop(con, route_id, 2, 31, 51)
+
+        with pytest.raises(route_geometry.sqlite3.IntegrityError):
+            route_geometry.save_geometry(
+                con, route_id, "forward", _geometry([[30, 50], [31, 51]]),
+                "manual", 0, None, "now",
+            )
+        assert get_geometry(con, route_id, "forward") is None
     finally:
         con.close()
