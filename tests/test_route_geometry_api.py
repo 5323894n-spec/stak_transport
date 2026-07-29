@@ -99,6 +99,18 @@ def test_validate_geometry_shape_rejects_wrong_or_missing_type(geometry):
 
 
 @pytest.mark.parametrize(
+    "geometry",
+    [
+        {"type": "LineString"},
+        {"type": "LineString", "coordinates": ((0, 0), (1, 1))},
+    ],
+)
+def test_validate_geometry_shape_requires_coordinates_list(geometry):
+    with pytest.raises(GeometryValidationError, match="списком"):
+        validate_geometry_shape(geometry)
+
+
+@pytest.mark.parametrize(
     "coordinates",
     [
         [],
