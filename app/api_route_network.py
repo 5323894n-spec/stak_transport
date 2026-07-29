@@ -17,7 +17,7 @@ from .route_network import recalculate_trace
 from .route_migration import migrate_route
 from .route_geometry import (
     GeometryValidationError, GeometryVersionConflict, delete_geometry,
-    get_geometry, save_geometry,
+    get_geometry, normalize_osrm_geometry, save_geometry, stop_anchors,
 )
 
 
@@ -486,10 +486,14 @@ def route_osrm_preview(route_id: int, direction: str, user=Depends(current_user)
             row["stop"]["latitude"] is None or row["stop"]["longitude"] is None
         )]
         if missing:
-            raise HTTPException(400, "Не хватает координат остановок: " + ", ".join(map(str, missing)))
+            raise HTTPException(
+                400,
+                "Не хватает координат остановок: " + ", ".join(map(str, missing)),
+            )
         coordinates = [
             (row["stop"]["longitude"], row["stop"]["latitude"]) for row in rows
         ]
+        anchors = stop_anchors(con, route_id, direction)
         settings = db.get_settings(con)
         try:
             calculated = osrm.request_route(
@@ -501,6 +505,12 @@ def route_osrm_preview(route_id: int, direction: str, user=Depends(current_user)
             raise HTTPException(503, str(exc))
         except osrm.OSRMError as exc:
             raise HTTPException(502, str(exc))
+        try:
+            geometry = normalize_osrm_geometry(calculated["geometry"], anchors)
+        except GeometryValidationError as exc:
+            raise HTTPException(
+                502, f"OSRM вернул некорректную геометрию: {exc}"
+            ) from exc
         diff = []
         for index, leg in enumerate(calculated["legs"], start=1):
             row = rows[index]
@@ -512,12 +522,17 @@ def route_osrm_preview(route_id: int, direction: str, user=Depends(current_user)
                 "old_run_time_sec": row["run_time_sec"],
                 "new_run_time_sec": int(round(leg["duration"])),
             })
+        current_geometry = get_geometry(con, route_id, direction)
+        expected_geometry_version = (
+            current_geometry["version"] if current_geometry else 0
+        )
         plan = {
             "kind": "osrm",
             "route_id": route_id,
             "direction": direction,
             "diff": diff,
-            "geometry": calculated["geometry"],
+            "geometry": geometry,
+            "expected_geometry_version": expected_geometry_version,
         }
         token = secrets.token_hex(16)
         created = datetime.datetime.now()
@@ -526,24 +541,35 @@ def route_osrm_preview(route_id: int, direction: str, user=Depends(current_user)
             "INSERT INTO route_import_previews("
             "token,route_id,username,created_at,expires_at,source_name,payload_json"
             ") VALUES(?,?,?,?,?,?,?)",
-            (token, route_id, user["username"], created.isoformat(timespec="seconds"),
-             expires.isoformat(timespec="seconds"), f"osrm:{direction}",
-             json.dumps(plan, ensure_ascii=False)),
+            (
+                token,
+                route_id,
+                user["username"],
+                created.isoformat(timespec="seconds"),
+                expires.isoformat(timespec="seconds"),
+                f"osrm:{direction}",
+                json.dumps(plan, ensure_ascii=False),
+            ),
         )
         con.commit()
         return {
             "preview_token": token,
             "expires_at": expires.isoformat(timespec="seconds"),
             "diff": diff,
-            "geometry": calculated["geometry"],
+            "geometry": geometry,
+            "geometry_version": expected_geometry_version,
         }
     finally:
         con.close()
 
 
 @router.post("/routes/{route_id}/osrm/apply/{direction}")
-def route_osrm_apply(route_id: int, direction: str, payload: dict = Body(...),
-                     user=Depends(current_user)):
+def route_osrm_apply(
+    route_id: int,
+    direction: str,
+    payload: dict = Body(...),
+    user=Depends(current_user),
+):
     require_write(user, "routes")
     if direction not in ("forward", "backward"):
         raise HTTPException(400, "Направление должно быть forward или backward")
@@ -552,8 +578,11 @@ def route_osrm_apply(route_id: int, direction: str, payload: dict = Body(...),
         raise HTTPException(400, "Не передан preview_token")
     con = db.connect()
     try:
+        con.execute("BEGIN IMMEDIATE")
+        _route_or_404(con, route_id)
         preview = db.one(con.execute(
-            "SELECT * FROM route_import_previews WHERE token=? AND route_id=? AND username=?",
+            "SELECT * FROM route_import_previews "
+            "WHERE token=? AND route_id=? AND username=?",
             (token, route_id, user["username"]),
         ))
         if not preview or preview["source_name"] != f"osrm:{direction}":
@@ -566,13 +595,30 @@ def route_osrm_apply(route_id: int, direction: str, payload: dict = Body(...),
         plan = json.loads(preview["payload_json"])
         if plan.get("kind") != "osrm" or plan.get("direction") != direction:
             raise HTTPException(400, "Некорректный предпросмотр OSRM")
+        expected_geometry_version = plan.get("expected_geometry_version")
+        payload_geometry_version = payload.get("expected_geometry_version")
+        if (
+            type(payload_geometry_version) is not int
+            or payload_geometry_version != expected_geometry_version
+        ):
+            raise HTTPException(
+                409,
+                "Версия геометрии не совпадает с версией предпросмотра OSRM",
+            )
+        timestamp = now.isoformat(timespec="seconds")
         for item in plan["diff"]:
             con.execute(
                 "UPDATE route_stops SET distance_from_prev_km=?,run_time_sec=?,"
                 "distance_source='auto_osrm',updated_at=? "
                 "WHERE id=? AND route_id=? AND direction=?",
-                (item["new_distance_km"], item["new_run_time_sec"],
-                 now.isoformat(timespec="seconds"), item["route_stop_id"], route_id, direction),
+                (
+                    item["new_distance_km"],
+                    item["new_run_time_sec"],
+                    timestamp,
+                    item["route_stop_id"],
+                    route_id,
+                    direction,
+                ),
             )
         cumulative = 0.0
         rows = db.rows(con.execute(
@@ -581,20 +627,56 @@ def route_osrm_apply(route_id: int, direction: str, payload: dict = Body(...),
             (route_id, direction),
         ))
         for row in rows:
-            cumulative = round(cumulative + float(row["distance_from_prev_km"] or 0), 3)
-            con.execute("UPDATE route_stops SET cumulative_km=? WHERE id=?", (cumulative, row["id"]))
+            cumulative = round(
+                cumulative + float(row["distance_from_prev_km"] or 0), 3
+            )
+            con.execute(
+                "UPDATE route_stops SET cumulative_km=? WHERE id=?",
+                (cumulative, row["id"]),
+            )
         length_field = "length_km" if direction == "forward" else "length_back_km"
-        con.execute(f"UPDATE routes SET {length_field}=? WHERE id=?", (cumulative, route_id))
+        con.execute(
+            f"UPDATE routes SET {length_field}=? WHERE id=?",
+            (cumulative, route_id),
+        )
+        old_geometry, saved_geometry = save_geometry(
+            con,
+            route_id,
+            direction,
+            plan.get("geometry"),
+            "osrm",
+            expected_geometry_version,
+            user["username"],
+            timestamp,
+        )
         con.execute(
             "UPDATE route_import_previews SET applied_at=? WHERE token=?",
-            (now.isoformat(timespec="seconds"), token),
+            (timestamp, token),
         )
         db.audit(
-            con, user["username"], "применение трассы OSRM", "routes", route_id,
-            new={"direction": direction, "diff": plan["diff"], "total_km": cumulative},
+            con,
+            user["username"],
+            "применение трассы OSRM",
+            "routes",
+            route_id,
+            old=_geometry_summary(direction, old_geometry),
+            new={
+                **_geometry_summary(direction, saved_geometry),
+                "total_km": cumulative,
+                "diff": plan["diff"],
+            },
         )
         con.commit()
         return {"ok": True, "direction": direction, "total_km": cumulative}
+    except GeometryVersionConflict as exc:
+        con.rollback()
+        raise HTTPException(409, str(exc)) from exc
+    except GeometryValidationError as exc:
+        con.rollback()
+        raise HTTPException(400, str(exc)) from exc
+    except Exception:
+        con.rollback()
+        raise
     finally:
         con.close()
 

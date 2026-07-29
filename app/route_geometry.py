@@ -111,6 +111,38 @@ def validate_geometry_shape(geometry):
     return normalized
 
 
+def normalize_osrm_geometry(geometry, anchors):
+    """Привязать геометрию OSRM к точным координатам остановок."""
+    coordinates = validate_geometry_shape(geometry)
+    normalized_anchors = [
+        _normalize_coordinate(anchor, number)
+        for number, anchor in enumerate(anchors, start=1)
+    ]
+    if len(coordinates) < len(normalized_anchors):
+        raise GeometryValidationError(
+            "Геометрия OSRM содержит меньше координат, чем остановок маршрута."
+        )
+
+    cursor = 0
+    for index, anchor in enumerate(normalized_anchors):
+        remaining_anchors = len(normalized_anchors) - index - 1
+        last_candidate = len(coordinates) - remaining_anchors - 1
+        nearest = min(
+            range(cursor, last_candidate + 1),
+            key=lambda coordinate_index: (
+                (coordinates[coordinate_index][0] - anchor[0]) ** 2
+                + (coordinates[coordinate_index][1] - anchor[1]) ** 2
+            ),
+        )
+        coordinates[nearest] = [float(anchor[0]), float(anchor[1])]
+        cursor = nearest + 1
+
+    return validate_geometry(
+        {"type": "LineString", "coordinates": coordinates},
+        normalized_anchors,
+    )
+
+
 def validate_geometry(geometry, anchors):
     """Проверить LineString и прохождение через остановки в заданном порядке."""
     coordinates = validate_geometry_shape(geometry)

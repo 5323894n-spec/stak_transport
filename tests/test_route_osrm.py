@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 import json
 
+import pytest
 from fastapi.testclient import TestClient
 
 
@@ -62,6 +63,121 @@ def add_trace(client, route_id, with_coordinates=True):
     assert response.status_code == 200
 
 
+def add_three_stop_trace(client, route_id, directions=("forward",)):
+    coordinates = [
+        [35.901, 56.801],
+        [35.906, 56.804],
+        [35.912, 56.809],
+    ]
+    stop_ids = []
+    for index, (longitude, latitude) in enumerate(coordinates, 1):
+        response = client.post("/api/stops", json={
+            "name": f"OSRM точка {index}",
+            "external_code": f"OSRM-{index}",
+            "longitude": longitude,
+            "latitude": latitude,
+        })
+        assert response.status_code == 200, response.text
+        stop_ids.append(response.json()["id"])
+
+    anchors = {}
+    for direction in directions:
+        ordered_ids = stop_ids if direction == "forward" else list(reversed(stop_ids))
+        response = client.put(
+            f"/api/routes/{route_id}/stops/{direction}",
+            json={"items": [
+                {
+                    "stop_id": stop_id,
+                    "sequence": sequence,
+                    "distance_from_prev_km": 0 if sequence == 1 else sequence,
+                    "run_time_sec": 0 if sequence == 1 else sequence * 100,
+                }
+                for sequence, stop_id in enumerate(ordered_ids, 1)
+            ]},
+        )
+        assert response.status_code == 200, response.text
+        anchors[direction] = (
+            coordinates if direction == "forward" else list(reversed(coordinates))
+        )
+    return anchors
+
+
+def realistic_osrm_result(anchors):
+    first, middle, last = anchors
+    return {
+        "geometry": {
+            "type": "LineString",
+            "coordinates": [
+                [first[0] + 0.00004, first[1] - 0.00003],
+                [(first[0] + middle[0]) / 2, (first[1] + middle[1]) / 2],
+                [middle[0] - 0.00003, middle[1] + 0.00002],
+                [(middle[0] + last[0]) / 2, (middle[1] + last[1]) / 2],
+                [last[0] + 0.00002, last[1] - 0.00004],
+            ],
+        },
+        "legs": [
+            {"distance": 1250, "duration": 180},
+            {"distance": 1750, "duration": 240},
+        ],
+    }
+
+
+def osrm_audits(route_id):
+    from app import db
+
+    con = db.connect()
+    try:
+        return [dict(row) for row in con.execute(
+            "SELECT * FROM audit_log WHERE action='применение трассы OSRM' "
+            "AND object_id=? ORDER BY id",
+            (str(route_id),),
+        )]
+    finally:
+        con.close()
+
+
+def osrm_state(route_id, direction, token):
+    from app import db
+    from app.route_geometry import get_geometry
+
+    con = db.connect()
+    try:
+        length_field = "length_km" if direction == "forward" else "length_back_km"
+        preview = con.execute(
+            "SELECT applied_at FROM route_import_previews WHERE token=?", (token,)
+        ).fetchone()
+        return {
+            "stops": [dict(row) for row in con.execute(
+                "SELECT id,distance_from_prev_km,run_time_sec,cumulative_km,"
+                "distance_source FROM route_stops WHERE route_id=? AND direction=? "
+                "ORDER BY sequence",
+                (route_id, direction),
+            )],
+            "geometry": get_geometry(con, route_id, direction),
+            "length": con.execute(
+                f"SELECT {length_field} FROM routes WHERE id=?", (route_id,)
+            ).fetchone()[length_field],
+            "applied_at": preview["applied_at"] if preview else None,
+            "audits": osrm_audits(route_id),
+        }
+    finally:
+        con.close()
+
+
+def test_normalize_osrm_geometry_snaps_ordered_anchors_and_preserves_shape():
+    from app import route_geometry
+
+    anchors = [[35.901, 56.801], [35.906, 56.804], [35.912, 56.809]]
+    geometry = realistic_osrm_result(anchors)["geometry"]
+    intermediate = [geometry["coordinates"][1][:], geometry["coordinates"][3][:]]
+
+    normalized = route_geometry.normalize_osrm_geometry(geometry, anchors)
+
+    assert normalized["coordinates"][0] == anchors[0]
+    assert normalized["coordinates"][2] == anchors[1]
+    assert normalized["coordinates"][4] == anchors[2]
+    assert [normalized["coordinates"][1], normalized["coordinates"][3]] == intermediate
+
 def test_osrm_client_validates_and_normalizes_response(monkeypatch):
     import app.osrm as osrm
 
@@ -100,6 +216,7 @@ def test_osrm_preview_does_not_apply_until_confirmed(tmp_path, monkeypatch):
 
     applied = client.post(f"/api/routes/{route_id}/osrm/apply/forward", json={
         "preview_token": preview.json()["preview_token"],
+        "expected_geometry_version": preview.json()["geometry_version"],
     })
 
     assert applied.status_code == 200, applied.text
@@ -133,3 +250,245 @@ def test_osrm_timeout_is_reported_as_service_unavailable(tmp_path, monkeypatch):
 
     assert response.status_code == 503
     assert "OSRM" in response.json()["detail"]
+
+
+def test_osrm_preview_snaps_all_anchors_without_mutating_network(tmp_path, monkeypatch):
+    import app.osrm as osrm
+
+    client, route_id = make_client(tmp_path)
+    anchors = add_three_stop_trace(client, route_id)["forward"]
+    result = realistic_osrm_result(anchors)
+    monkeypatch.setattr(osrm, "request_route", lambda coordinates, **kwargs: result)
+
+    preview = client.post(f"/api/routes/{route_id}/osrm/preview/forward")
+
+    assert preview.status_code == 200, preview.text
+    body = preview.json()
+    assert body["geometry_version"] == 0
+    assert body["geometry"]["coordinates"][0] == anchors[0]
+    assert body["geometry"]["coordinates"][2] == anchors[1]
+    assert body["geometry"]["coordinates"][4] == anchors[2]
+    network = client.get(f"/api/routes/{route_id}/network").json()
+    assert network["geometries"]["forward"] is None
+    assert [row["distance_from_prev_km"] for row in network["forward"]] == [0.0, 2.0, 3.0]
+    assert [row["run_time_sec"] for row in network["forward"]] == [0, 200, 300]
+
+
+def test_osrm_apply_persists_geometry_and_distance_updates_atomically(tmp_path, monkeypatch):
+    import app.osrm as osrm
+
+    client, route_id = make_client(tmp_path)
+    anchors = add_three_stop_trace(client, route_id)["forward"]
+    monkeypatch.setattr(
+        osrm, "request_route", lambda coordinates, **kwargs: realistic_osrm_result(anchors)
+    )
+    preview = client.post(f"/api/routes/{route_id}/osrm/preview/forward")
+    assert preview.status_code == 200, preview.text
+
+    applied = client.post(f"/api/routes/{route_id}/osrm/apply/forward", json={
+        "preview_token": preview.json()["preview_token"],
+        "expected_geometry_version": 0,
+    })
+
+    assert applied.status_code == 200, applied.text
+    network = client.get(f"/api/routes/{route_id}/network").json()
+    assert [row["distance_from_prev_km"] for row in network["forward"]] == [0.0, 1.25, 1.75]
+    assert [row["run_time_sec"] for row in network["forward"]] == [0, 180, 240]
+    geometry = network["geometries"]["forward"]
+    assert geometry["source"] == "osrm"
+    assert geometry["version"] == 1
+    assert geometry["geometry"] == preview.json()["geometry"]
+
+
+def test_osrm_apply_rejects_stale_preview_without_partial_mutation(tmp_path, monkeypatch):
+    import app.osrm as osrm
+
+    client, route_id = make_client(tmp_path)
+    anchors = add_three_stop_trace(client, route_id)["forward"]
+    manual_v1 = {"type": "LineString", "coordinates": [
+        anchors[0], [35.904, 56.803], anchors[1], anchors[2],
+    ]}
+    saved = client.put(f"/api/routes/{route_id}/geometry/forward", json={
+        "geometry": manual_v1, "expected_version": 0,
+    })
+    assert saved.status_code == 200, saved.text
+    monkeypatch.setattr(
+        osrm, "request_route", lambda coordinates, **kwargs: realistic_osrm_result(anchors)
+    )
+    preview = client.post(f"/api/routes/{route_id}/osrm/preview/forward")
+    assert preview.status_code == 200, preview.text
+    assert preview.json()["geometry_version"] == 1
+    token = preview.json()["preview_token"]
+    manual_v2 = {"type": "LineString", "coordinates": [
+        anchors[0], [35.905, 56.8035], anchors[1], anchors[2],
+    ]}
+    updated = client.put(f"/api/routes/{route_id}/geometry/forward", json={
+        "geometry": manual_v2, "expected_version": 1,
+    })
+    assert updated.status_code == 200, updated.text
+    before = osrm_state(route_id, "forward", token)
+
+    applied = client.post(f"/api/routes/{route_id}/osrm/apply/forward", json={
+        "preview_token": token,
+        "expected_geometry_version": 1,
+    })
+
+    assert applied.status_code == 409, applied.text
+    assert osrm_state(route_id, "forward", token) == before
+
+
+def test_osrm_apply_rejects_version_different_from_preview_before_mutation(tmp_path, monkeypatch):
+    import app.osrm as osrm
+
+    client, route_id = make_client(tmp_path)
+    anchors = add_three_stop_trace(client, route_id)["forward"]
+    monkeypatch.setattr(
+        osrm, "request_route", lambda coordinates, **kwargs: realistic_osrm_result(anchors)
+    )
+    preview = client.post(f"/api/routes/{route_id}/osrm/preview/forward")
+    assert preview.status_code == 200, preview.text
+    token = preview.json()["preview_token"]
+    before = osrm_state(route_id, "forward", token)
+
+    applied = client.post(f"/api/routes/{route_id}/osrm/apply/forward", json={
+        "preview_token": token,
+        "expected_geometry_version": 1,
+    })
+
+    assert applied.status_code == 409, applied.text
+    assert osrm_state(route_id, "forward", token) == before
+
+
+def test_osrm_preview_rejects_geometry_with_fewer_vertices_than_stops(tmp_path, monkeypatch):
+    import app.osrm as osrm
+    from app import db
+
+    client, route_id = make_client(tmp_path)
+    anchors = add_three_stop_trace(client, route_id)["forward"]
+    monkeypatch.setattr(osrm, "request_route", lambda coordinates, **kwargs: {
+        "geometry": {"type": "LineString", "coordinates": [anchors[0], anchors[-1]]},
+        "legs": [
+            {"distance": 1000, "duration": 100},
+            {"distance": 1000, "duration": 100},
+        ],
+    })
+
+    response = client.post(f"/api/routes/{route_id}/osrm/preview/forward")
+
+    assert response.status_code == 502, response.text
+    assert "координат" in response.json()["detail"].lower()
+    con = db.connect()
+    try:
+        assert con.execute(
+            "SELECT COUNT(*) FROM route_import_previews WHERE route_id=? "
+            "AND source_name='osrm:forward'",
+            (route_id,),
+        ).fetchone()[0] == 0
+    finally:
+        con.close()
+
+
+@pytest.mark.parametrize("failure_point", ["save_geometry", "audit"])
+def test_osrm_apply_rolls_back_everything_after_injected_failure(
+    tmp_path, monkeypatch, failure_point
+):
+    import app.osrm as osrm
+    import app.api_route_network as api_route_network
+
+    client, route_id = make_client(tmp_path)
+    anchors = add_three_stop_trace(client, route_id)["forward"]
+    monkeypatch.setattr(
+        osrm, "request_route", lambda coordinates, **kwargs: realistic_osrm_result(anchors)
+    )
+    preview = client.post(f"/api/routes/{route_id}/osrm/preview/forward")
+    assert preview.status_code == 200, preview.text
+    token = preview.json()["preview_token"]
+    before = osrm_state(route_id, "forward", token)
+
+    def fail(*args, **kwargs):
+        raise RuntimeError(f"forced {failure_point} failure")
+
+    if failure_point == "save_geometry":
+        monkeypatch.setattr(api_route_network, "save_geometry", fail)
+    else:
+        monkeypatch.setattr(api_route_network.db, "audit", fail)
+
+    with pytest.raises(RuntimeError, match=f"forced {failure_point} failure"):
+        client.post(f"/api/routes/{route_id}/osrm/apply/forward", json={
+            "preview_token": token,
+            "expected_geometry_version": 0,
+        })
+
+    assert osrm_state(route_id, "forward", token) == before
+
+
+def test_osrm_apply_writes_one_summary_audit_and_cannot_repeat(tmp_path, monkeypatch):
+    import app.osrm as osrm
+
+    client, route_id = make_client(tmp_path)
+    anchors = add_three_stop_trace(client, route_id)["forward"]
+    monkeypatch.setattr(
+        osrm, "request_route", lambda coordinates, **kwargs: realistic_osrm_result(anchors)
+    )
+    preview = client.post(f"/api/routes/{route_id}/osrm/preview/forward")
+    token = preview.json()["preview_token"]
+    payload = {"preview_token": token, "expected_geometry_version": 0}
+
+    first = client.post(f"/api/routes/{route_id}/osrm/apply/forward", json=payload)
+    second = client.post(f"/api/routes/{route_id}/osrm/apply/forward", json=payload)
+
+    assert first.status_code == 200, first.text
+    assert second.status_code == 409, second.text
+    audits = osrm_audits(route_id)
+    assert len(audits) == 1
+    old_summary = json.loads(audits[0]["old_value"])
+    new_summary = json.loads(audits[0]["new_value"])
+    assert old_summary == {
+        "direction": "forward", "source": None, "version": 0, "coordinates": 0,
+    }
+    assert new_summary["direction"] == "forward"
+    assert new_summary["source"] == "osrm"
+    assert new_summary["version"] == 1
+    assert new_summary["coordinates"] == 5
+    assert new_summary["total_km"] == 3.0
+    assert new_summary["diff"] == preview.json()["diff"]
+    assert "LineString" not in audits[0]["old_value"]
+    assert "LineString" not in audits[0]["new_value"]
+
+
+def test_osrm_forward_and_backward_geometry_versions_are_independent(tmp_path, monkeypatch):
+    import app.osrm as osrm
+
+    client, route_id = make_client(tmp_path)
+    add_three_stop_trace(client, route_id, directions=("forward", "backward"))
+    monkeypatch.setattr(
+        osrm,
+        "request_route",
+        lambda coordinates, **kwargs: realistic_osrm_result([list(point) for point in coordinates]),
+    )
+
+    forward_preview = client.post(f"/api/routes/{route_id}/osrm/preview/forward")
+    assert forward_preview.status_code == 200, forward_preview.text
+    assert forward_preview.json()["geometry_version"] == 0
+    forward_apply = client.post(f"/api/routes/{route_id}/osrm/apply/forward", json={
+        "preview_token": forward_preview.json()["preview_token"],
+        "expected_geometry_version": 0,
+    })
+    assert forward_apply.status_code == 200, forward_apply.text
+    halfway = client.get(f"/api/routes/{route_id}/network").json()
+    assert halfway["geometries"]["forward"]["version"] == 1
+    assert halfway["geometries"]["backward"] is None
+    assert [row["distance_from_prev_km"] for row in halfway["backward"]] == [0.0, 2.0, 3.0]
+
+    backward_preview = client.post(f"/api/routes/{route_id}/osrm/preview/backward")
+    assert backward_preview.status_code == 200, backward_preview.text
+    assert backward_preview.json()["geometry_version"] == 0
+    backward_apply = client.post(f"/api/routes/{route_id}/osrm/apply/backward", json={
+        "preview_token": backward_preview.json()["preview_token"],
+        "expected_geometry_version": 0,
+    })
+    assert backward_apply.status_code == 200, backward_apply.text
+    network = client.get(f"/api/routes/{route_id}/network").json()
+    assert network["geometries"]["forward"]["version"] == 1
+    assert network["geometries"]["backward"]["version"] == 1
+    assert network["geometries"]["forward"]["geometry"] != network["geometries"]["backward"]["geometry"]
