@@ -56,9 +56,15 @@ def _normalize_coordinate(point, number):
 
 
 def _coordinates_match(first, second):
+    longitude_tolerance = ANCHOR_TOLERANCE + max(
+        math.ulp(first[0]), math.ulp(second[0])
+    )
+    latitude_tolerance = ANCHOR_TOLERANCE + max(
+        math.ulp(first[1]), math.ulp(second[1])
+    )
     return (
-        abs(first[0] - second[0]) <= ANCHOR_TOLERANCE
-        and abs(first[1] - second[1]) <= ANCHOR_TOLERANCE
+        abs(first[0] - second[0]) <= longitude_tolerance
+        and abs(first[1] - second[1]) <= latitude_tolerance
     )
 
 

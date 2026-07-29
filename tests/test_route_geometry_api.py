@@ -24,10 +24,10 @@ def _geometry(coordinates):
     return {"type": "LineString", "coordinates": coordinates}
 
 
-def _open_route_db(tmp_path):
+def _open_route_db(tmp_path, monkeypatch):
     from app import db
 
-    db.DB_PATH = str(tmp_path / "route-geometry-api.db")
+    monkeypatch.setattr(db, "DB_PATH", str(tmp_path / "route-geometry-api.db"))
     db.init_db()
     return db.connect()
 
@@ -233,6 +233,41 @@ def test_validate_geometry_rejects_anchor_just_outside_tolerance():
         )
 
 
+@pytest.mark.parametrize(
+    ("start", "anchor"),
+    [
+        ([30, 50], [30.000001, 50.000001]),
+        ([-30, -50], [-30.000001, -50.000001]),
+    ],
+)
+def test_validate_geometry_accepts_realistic_decimal_tolerance_boundary(
+    start, anchor
+):
+    result = validate_geometry(
+        _geometry([start, [0, 0]]),
+        [anchor, [0, 0]],
+    )
+
+    assert result["coordinates"] == [
+        [float(start[0]), float(start[1])],
+        [0.0, 0.0],
+    ]
+
+
+@pytest.mark.parametrize(
+    ("start", "anchor"),
+    [
+        ([30, 50], [30.00000101, 50.00000101]),
+        ([-30, -50], [-30.00000101, -50.00000101]),
+    ],
+)
+def test_validate_geometry_rejects_realistic_coordinates_just_outside_tolerance(
+    start, anchor
+):
+    with pytest.raises(GeometryValidationError, match="останов"):
+        validate_geometry(_geometry([start, [0, 0]]), [anchor, [0, 0]])
+
+
 def test_validate_geometry_shape_enforces_serialized_byte_limit(monkeypatch):
     monkeypatch.setattr(route_geometry, "MAX_GEOMETRY_BYTES", 20)
 
@@ -240,8 +275,10 @@ def test_validate_geometry_shape_enforces_serialized_byte_limit(monkeypatch):
         validate_geometry_shape(_geometry([[0, 0], [1, 1]]))
 
 
-def test_stop_anchors_returns_longitude_latitude_in_sequence_order(tmp_path):
-    con = _open_route_db(tmp_path)
+def test_stop_anchors_returns_longitude_latitude_in_sequence_order(
+    tmp_path, monkeypatch
+):
+    con = _open_route_db(tmp_path, monkeypatch)
     try:
         route_id = _insert_route(con)
         _insert_route_stop(con, route_id, 2, 31.25, 51.5)
@@ -255,8 +292,8 @@ def test_stop_anchors_returns_longitude_latitude_in_sequence_order(tmp_path):
         con.close()
 
 
-def test_stop_anchors_rejects_too_few_stops(tmp_path):
-    con = _open_route_db(tmp_path)
+def test_stop_anchors_rejects_too_few_stops(tmp_path, monkeypatch):
+    con = _open_route_db(tmp_path, monkeypatch)
     try:
         route_id = _insert_route(con)
         _insert_route_stop(con, route_id, 1, 30, 50)
@@ -274,8 +311,10 @@ def test_stop_anchors_rejects_too_few_stops(tmp_path):
         (30, None),
     ],
 )
-def test_stop_anchors_rejects_missing_coordinates(tmp_path, longitude, latitude):
-    con = _open_route_db(tmp_path)
+def test_stop_anchors_rejects_missing_coordinates(
+    tmp_path, monkeypatch, longitude, latitude
+):
+    con = _open_route_db(tmp_path, monkeypatch)
     try:
         route_id = _insert_route(con)
         _insert_route_stop(con, route_id, 1, 30, 50)
@@ -291,8 +330,8 @@ def test_geometry_record_returns_none_for_missing_row():
     assert geometry_record(None) is None
 
 
-def test_get_geometry_returns_none_when_not_saved(tmp_path):
-    con = _open_route_db(tmp_path)
+def test_get_geometry_returns_none_when_not_saved(tmp_path, monkeypatch):
+    con = _open_route_db(tmp_path, monkeypatch)
     try:
         route_id = _insert_route(con)
 
@@ -301,8 +340,10 @@ def test_get_geometry_returns_none_when_not_saved(tmp_path):
         con.close()
 
 
-def test_geometry_record_and_get_geometry_serialize_public_fields(tmp_path):
-    con = _open_route_db(tmp_path)
+def test_geometry_record_and_get_geometry_serialize_public_fields(
+    tmp_path, monkeypatch
+):
+    con = _open_route_db(tmp_path, monkeypatch)
     try:
         route_id = _insert_route(con)
         geometry = _geometry([[30.0, 50.0], [31.0, 51.0]])
