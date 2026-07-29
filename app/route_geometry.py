@@ -488,12 +488,16 @@ def _synchronization_summary(route_id, direction, record):
             "version": 0,
             "coordinates": 0,
         }
+    geometry = record.get("geometry")
+    coordinates = (
+        geometry.get("coordinates") if isinstance(geometry, dict) else None
+    )
     return {
         "route_id": route_id,
         "direction": direction,
         "source": record["source"],
         "version": record["version"],
-        "coordinates": len(record["geometry"]["coordinates"]),
+        "coordinates": len(coordinates) if isinstance(coordinates, list) else 0,
     }
 
 

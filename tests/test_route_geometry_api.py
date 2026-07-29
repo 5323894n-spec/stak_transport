@@ -1560,3 +1560,73 @@ def test_failure_after_trace_geometry_reset_rolls_back_trace_and_geometry(
         ).fetchone()[0] == before_revision
     finally:
         con.close()
+
+@pytest.mark.parametrize("corrupt_geometry", [
+    {},
+    {"type": "LineString", "coordinates": "bad"},
+])
+def test_structurally_corrupt_geometry_resets_and_recreates_monotonically(
+    geometry_api, corrupt_geometry
+):
+    from app import db
+
+    client = geometry_api["client"]
+    route_id = geometry_api["route_id"]
+    assert _put_geometry(
+        client, route_id, "forward", geometry_api["forward"], 0
+    ).status_code == 200
+    stop_id = client.get(
+        f"/api/routes/{route_id}/network"
+    ).json()["forward"][0]["stop"]["id"]
+    con = db.connect()
+    try:
+        con.execute(
+            "UPDATE route_geometries SET geometry_json=? "
+            "WHERE route_id=? AND direction='forward'",
+            (json.dumps(corrupt_geometry), route_id),
+        )
+        con.commit()
+    finally:
+        con.close()
+
+    response = client.put(
+        f"/api/stops/{stop_id}", json={"longitude": 30.25}
+    )
+
+    assert response.status_code == 200, response.text
+    con = db.connect()
+    try:
+        stop = con.execute(
+            "SELECT longitude,latitude FROM stops WHERE id=?", (stop_id,)
+        ).fetchone()
+        assert (stop["longitude"], stop["latitude"]) == (30.25, 50.0)
+        assert con.execute(
+            "SELECT last_version FROM route_geometry_revisions "
+            "WHERE route_id=? AND direction='forward'", (route_id,)
+        ).fetchone()[0] == 1
+        audit_value = con.execute(
+            "SELECT new_value FROM audit_log WHERE object_type='stops' "
+            "AND object_id=? ORDER BY id DESC LIMIT 1", (str(stop_id),)
+        ).fetchone()["new_value"]
+    finally:
+        con.close()
+    assert _stored_geometry(route_id, "forward") is None
+    audit_new = json.loads(audit_value)
+    change = audit_new["geometry_changes"][0]
+    assert change["old"]["source"] == "manual"
+    assert change["old"]["version"] == 1
+    assert change["old"]["coordinates"] == 0
+    assert change["new"]["source"] is None
+    assert change["new"]["coordinates"] == 0
+    assert "LineString" not in audit_value
+    assert '"bad"' not in audit_value
+
+    recreated = _put_geometry(
+        client,
+        route_id,
+        "forward",
+        [[30.25, 50.0], [31.0, 51.0]],
+        0,
+    )
+    assert recreated.status_code == 200, recreated.text
+    assert recreated.json()["version"] == 2
