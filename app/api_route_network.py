@@ -17,8 +17,8 @@ from .route_network import recalculate_trace
 from .route_migration import migrate_route
 from .route_geometry import (
     GeometryValidationError, GeometryVersionConflict, delete_geometry,
-    get_geometry, normalize_osrm_geometry, save_geometry, stop_anchors,
-    synchronize_stop_anchor,
+    get_geometry, normalize_osrm_geometry, reset_stored_geometry,
+    save_geometry, stop_anchors, synchronize_stop_anchor,
 )
 
 
@@ -295,11 +295,7 @@ def route_stops_replace(route_id: int, direction: str, payload: dict = Body(...)
         for item in items:
             _stop_or_404(con, int(item["stop_id"]))
         old = _direction_rows(con, route_id, direction)
-        old_geometry = get_geometry(con, route_id, direction)
-        if old_geometry is not None:
-            delete_geometry(
-                con, route_id, direction, old_geometry["version"]
-            )
+        old_geometry = reset_stored_geometry(con, route_id, direction)
         con.execute("DELETE FROM route_stops WHERE route_id=? AND direction=?",
                     (route_id, direction))
         timestamp = _now()
@@ -779,11 +775,23 @@ def _geometry_summary(direction, record):
             "version": 0,
             "coordinates": 0,
         }
+    if "geometry" in record:
+        geometry = record.get("geometry")
+        coordinates = (
+            geometry.get("coordinates") if isinstance(geometry, dict) else None
+        )
+        coordinate_count = (
+            len(coordinates) if isinstance(coordinates, list) else 0
+        )
+    else:
+        coordinate_count = record.get("coordinates", 0)
+        if type(coordinate_count) is not int or coordinate_count < 0:
+            coordinate_count = 0
     return {
         "direction": direction,
         "source": record["source"],
         "version": record["version"],
-        "coordinates": len(record["geometry"]["coordinates"]),
+        "coordinates": coordinate_count,
     }
 
 

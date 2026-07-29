@@ -91,6 +91,32 @@ def ordered_anchor_indexes(coordinates, anchors):
     return indexes
 
 
+def _unique_ordered_anchor_indexes(coordinates, anchors):
+    """Return the only full monotone anchor assignment or reject ambiguity."""
+    earliest = ordered_anchor_indexes(coordinates, anchors)
+    latest = [None] * len(anchors)
+    coordinate_index = len(coordinates) - 1
+    for anchor_index in range(len(anchors) - 1, -1, -1):
+        anchor = anchors[anchor_index]
+        while (
+            coordinate_index >= 0
+            and not _coordinates_match(coordinates[coordinate_index], anchor)
+        ):
+            coordinate_index -= 1
+        if coordinate_index < 0:
+            raise GeometryValidationError(
+                "Геометрия не проходит через все остановки маршрута "
+                "в заданном порядке."
+            )
+        latest[anchor_index] = coordinate_index
+        coordinate_index -= 1
+    if earliest != latest:
+        raise GeometryValidationError(
+            "Неоднозначная привязка геометрии к остановкам маршрута."
+        )
+    return earliest
+
+
 def validate_geometry_shape(geometry):
     """Проверить структуру LineString и вернуть нормализованные координаты."""
     if not isinstance(geometry, dict) or geometry.get("type") != "LineString":
@@ -463,6 +489,33 @@ def _delete_geometry_row(con, route_id, direction, current):
     _remember_revision(con, route_id, direction, current["version"])
 
 
+def _stored_coordinate_count(geometry_json):
+    try:
+        geometry = json.loads(geometry_json)
+    except (json.JSONDecodeError, TypeError):
+        return 0
+    if not isinstance(geometry, dict) or geometry.get("type") != "LineString":
+        return 0
+    coordinates = geometry.get("coordinates")
+    return len(coordinates) if isinstance(coordinates, list) else 0
+
+
+def reset_stored_geometry(con, route_id, direction):
+    """Delete raw stored geometry and return sanitized metadata without commit."""
+    _validate_direction(direction)
+    current = _current_geometry_row(con, route_id, direction)
+    if current is None:
+        return None
+    geometry_json = current["geometry_json"]
+    summary = {
+        "source": current["source"],
+        "version": current["version"],
+    }
+    _delete_geometry_row(con, route_id, direction, current)
+    summary["coordinates"] = _stored_coordinate_count(geometry_json)
+    return summary
+
+
 def delete_geometry(con, route_id, direction, expected_version):
     """Удалить геометрию с оптимистичной блокировкой без commit."""
     _validate_direction(direction)
@@ -582,7 +635,7 @@ def synchronize_stop_anchor(
                         anchor_number,
                     ))
             geometry_coordinates = validate_geometry_shape(current["geometry"])
-            vertex_indexes = ordered_anchor_indexes(
+            vertex_indexes = _unique_ordered_anchor_indexes(
                 geometry_coordinates, old_anchors
             )
             for anchor_index in target_anchor_indexes:
