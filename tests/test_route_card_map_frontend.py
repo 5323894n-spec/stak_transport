@@ -127,12 +127,26 @@ def test_route_map_marker_labels_keep_full_stop_sequence_when_coordinates_are_mi
     assert "marker.bindTooltip(`${sequence}. ${esc(row.stop.name)}`)" in bind
 
 
-def test_route_card_clears_stale_osrm_geometry_on_direction_change_and_cancel():
+def test_route_card_clears_stale_osrm_preview_on_direction_change_and_cancel():
     source = (ROOT / "static" / "route-card.js").read_text(encoding="utf-8")
     direction = function_body(source, "routeCardDirection")
     cancel = function_body(source, "routeCardCancelOsrm")
 
     assert "state.osrmPreview = null" in direction
-    assert "state.geometry = null" in direction
+    assert "routeCardClearGeometryEditor(state)" in direction
     assert "window._routeCard.osrmPreview = null" in cancel
-    assert "window._routeCard.geometry = null" in cancel
+    assert "state.geometry =" not in source
+
+
+def test_route_card_manual_geometry_uses_separate_leaflet_layers():
+    source = (ROOT / "static" / "route-card.js").read_text(encoding="utf-8")
+    bind = function_body(source, "routeCardBindMap")
+
+    assert "const currentLine" in bind
+    assert "const previewLine" in bind
+    assert "const controlsLayer" in bind
+    assert 'color: "#dc2626"' in bind
+    assert 'dashArray: "10 8"' in bind
+    assert "draggable: !state.geometryEditor.active" in bind
+    assert "RouteGeometryEditor.visibleVertexIndexes" in bind
+    assert "geometryIndex" in bind

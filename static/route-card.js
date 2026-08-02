@@ -24,6 +24,7 @@ function routeCardState(routeId) {
       routeId: +routeId, tab: "passport", direction: "forward", network: null,
       drafts: {}, osrmPreview: null, importPreview: null,
       geometryEditor: { active: false, draft: null, error: "", saving: false },
+      mapTilesAvailable: true,
       periodDay: "будни", periodDrafts: {}, periodTemplates: [],
       periodTemplateId: "", periodTemplatePreview: null,
       periodCalcPreview: null, periodError: "", periodContinuous: false,
@@ -166,6 +167,11 @@ function routeCardStartGeometryEdit() {
 async function routeCardSaveGeometry() {
   const state = window._routeCard, editor = state.geometryEditor;
   if (!editor.active || editor.saving) return;
+  if (!state.mapTilesAvailable) {
+    editor.error = "Подложка OpenStreetMap недоступна. Сохранение линии отключено, чтобы не записать неточные координаты";
+    renderRouteCard(state);
+    return;
+  }
   editor.saving = true;
   editor.error = "";
   renderRouteCard(state);
@@ -194,6 +200,30 @@ function routeCardCancelGeometryEdit() {
   if (!routeCardConfirmGeometryDiscard(state)) return;
   routeCardClearGeometryEditor(state);
   renderRouteCard(state);
+}
+
+function routeCardGeometryCanDelete(state = window._routeCard) {
+  if (!state || !state.geometryEditor.active) return false;
+  const draft = state.geometryEditor.draft, index = draft.selectedIndex;
+  return Number.isInteger(index) && index > 0 && index < draft.coordinates.length - 1
+    && !draft.anchorIndexes.has(index);
+}
+
+function routeCardDeleteGeometryPoint() {
+  const state = window._routeCard;
+  if (!routeCardGeometryCanDelete(state)) return;
+  RouteGeometryEditor.deleteVertex(
+    state.geometryEditor.draft,
+    state.geometryEditor.draft.selectedIndex,
+  );
+  renderRouteCard(state);
+}
+
+function routeCardGeometryKeydown(event) {
+  if (!event || !["Delete", "Backspace"].includes(event.key)
+      || !routeCardGeometryCanDelete()) return;
+  event.preventDefault();
+  routeCardDeleteGeometryPoint();
 }
 
 async function routeCardResetGeometry() {
@@ -724,9 +754,10 @@ function routeCardMap(state) {
   const reset = routeCardCanEdit() && stored && !state.geometryEditor.active
     ? '<button class="btn sec" onclick="routeCardResetGeometry()">Сбросить линию</button>' : "";
   const editor = state.geometryEditor.active ? `<div class="route-geometry-editor" role="region" aria-label="Редактор линии трассы">
-    <span>Черновик линии можно сохранить или отменить.</span>
+    <span>Щёлкните по линии, чтобы добавить точку; перетащите точку для корректировки.</span>
+    ${routeCardGeometryCanDelete(state) ? '<button class="btn sec" aria-label="Удалить выбранную контрольную точку" onclick="routeCardDeleteGeometryPoint()">Удалить точку</button>' : ""}
     <button class="btn sec" onclick="routeCardCancelGeometryEdit()" ${state.geometryEditor.saving ? "disabled" : ""}>Отменить изменения</button>
-    <button class="btn" onclick="routeCardSaveGeometry()" ${state.geometryEditor.saving ? "disabled" : ""}>Сохранить линию</button>
+    <button class="btn" onclick="routeCardSaveGeometry()" ${state.geometryEditor.saving || !state.mapTilesAvailable ? "disabled" : ""}>Сохранить линию</button>
     ${state.geometryEditor.error ? `<div role="alert">${esc(state.geometryEditor.error)}</div>` : ""}</div>` : "";
   return `${routeDirectionSwitch(state)}<div class="route-card-toolbar"><div><b>Координатная схема</b><div class="muted">Схема без географической подложки. Маркер можно перетащить; новые координаты сохранятся после отпускания.</div></div>
     <div>${edit}${reset}<button class="btn sec" onclick="routeCardOsrmPreview()">Рассчитать через OSRM</button></div></div>${editor}
@@ -762,9 +793,17 @@ function routeCardShowMapFallback(message = "Подложка OpenStreetMap не
   if (canvas) canvas.hidden = true;
   if (fallback) fallback.hidden = false;
   if (warning) { warning.textContent = message; warning.hidden = false; }
+  const state = window._routeCard;
+  if (state && state.geometryEditor && state.geometryEditor.active) {
+    state.mapTilesAvailable = false;
+    state.geometryEditor.error = `${message}. Сохранение линии отключено, чтобы не записать неточные координаты`;
+    const save = document.querySelector('[onclick="routeCardSaveGeometry()"]');
+    if (save) save.disabled = true;
+  }
 }
 
 function routeCardBindFallbackDrag(state) {
+  if (state.geometryEditor.active) return;
   const svg = document.querySelector(".route-map-fallback svg");
   if (!svg || !state.mapBounds) return;
   let drag = null;
@@ -827,13 +866,23 @@ function routeCardBindMap(state) {
       if (routeMapInstance !== map) return;
       if (routeMapTileTimer) clearTimeout(routeMapTileTimer);
       routeMapTileTimer = null;
+      state.mapTilesAvailable = true;
     });
-    tileLayer.on("tileerror", () => { tileErrors += 1; });
+    tileLayer.on("tileerror", () => {
+      tileErrors += 1;
+      if (state.geometryEditor.active) routeCardShowMapFallback();
+    });
     const line = routeCardGeometryPoints(state, rows.map(item => item.row));
     if (line.length > 1) {
       window.L.polyline(line, { color: "white", weight: 10 }).addTo(map);
-      window.L.polyline(line, { color: "#2563eb", weight: 6 }).addTo(map);
     }
+    const currentLine = line.length > 1
+      ? window.L.polyline(line, { color: "#2563eb", weight: 6 }).addTo(map) : null;
+    const previewPoints = state.osrmPreview
+      ? state.osrmPreview.geometry.coordinates.map(point => [+point[1], +point[0]]) : [];
+    const previewLine = previewPoints.length > 1
+      ? window.L.polyline(previewPoints, { color: "#dc2626", weight: 5, dashArray: "10 8", className: "route-osrm-preview" }).addTo(map) : null;
+    const controlsLayer = window.L.layerGroup().addTo(map);
     rows.forEach(({ row, sequence }, index) => {
       let committed = [+row.stop.latitude, +row.stop.longitude];
       let saving = false;
@@ -844,9 +893,10 @@ function routeCardBindMap(state) {
         iconSize: [28, 28],
         iconAnchor: [14, 14],
       });
-      const marker = window.L.marker(committed, { icon, draggable: true }).addTo(map);
+      const marker = window.L.marker(committed, { icon, draggable: !state.geometryEditor.active }).addTo(map);
       marker.bindTooltip(`${sequence}. ${esc(row.stop.name)}`);
       marker.on("dragend", async () => {
+        if (state.geometryEditor.active) { marker.setLatLng(committed); return; }
         if (saving) { marker.setLatLng(committed); return; }
         saving = true;
         marker.dragging.disable();
@@ -865,6 +915,48 @@ function routeCardBindMap(state) {
         }
       });
     });
+    if (state.geometryEditor.active) {
+      const draft = state.geometryEditor.draft;
+      RouteGeometryEditor.visibleVertexIndexes(draft, 120)
+        .filter(index => index > 0 && index < draft.coordinates.length - 1
+          && !draft.anchorIndexes.has(index))
+        .forEach(index => {
+          const point = draft.coordinates[index];
+          const selected = draft.selectedIndex === index;
+          const icon = window.L.divIcon({
+            className: `route-geometry-control${selected ? " is-selected" : ""}`,
+            html: "<span></span>",
+            iconSize: selected ? [18, 18] : [12, 12],
+            iconAnchor: selected ? [9, 9] : [6, 6],
+          });
+          const controlMarker = window.L.marker([point[1], point[0]], {
+            icon, draggable: true, keyboard: true, geometryIndex: index,
+            title: `Контрольная точка ${index + 1}`,
+            alt: `Контрольная точка ${index + 1}`,
+          }).addTo(controlsLayer);
+          controlMarker.on("click", event => {
+            if (event.originalEvent) event.originalEvent.stopPropagation();
+            draft.selectedIndex = index;
+            renderRouteCard(state);
+          });
+          controlMarker.on("dragend", event => {
+            const moved = event.target.getLatLng();
+            RouteGeometryEditor.moveVertex(draft, index, [moved.lng, moved.lat]);
+            draft.selectedIndex = index;
+            renderRouteCard(state);
+          });
+        });
+      if (currentLine) currentLine.on("click", event => {
+        const projected = draft.coordinates.map(point => {
+          const screen = map.latLngToLayerPoint([point[1], point[0]]);
+          return [screen.x, screen.y];
+        });
+        const click = map.latLngToLayerPoint(event.latlng);
+        const segmentIndex = RouteGeometryEditor.nearestSegmentIndex([click.x, click.y], projected);
+        RouteGeometryEditor.insertVertex(draft, segmentIndex, [event.latlng.lng, event.latlng.lat]);
+        renderRouteCard(state);
+      });
+    }
     if (rows.length === 1) map.setView(line[0], 15);
     else map.fitBounds(line, { padding: [36, 36], maxZoom: 17 });
     routeMapTileTimer = setTimeout(() => {
@@ -1167,3 +1259,4 @@ window.onbeforeunload = event => {
   event.preventDefault();
   event.returnValue = "";
 };
+document.onkeydown = routeCardGeometryKeydown;

@@ -182,6 +182,97 @@ function readOnlyRoleCannotStartEditing() {
   assert.doesNotMatch(context.routeCardMap(state), /routeCardStartGeometryEdit/);
 }
 
+function fakeLeaflet() {
+  const markers = [];
+  const polylines = [];
+  function evented(value) {
+    const handlers = {};
+    return Object.assign(value, {
+      on(name, handler) { handlers[name] = handler; return this; },
+      fire(name, event = {}) { return handlers[name] && handlers[name](event); },
+    });
+  }
+  const map = evented({
+    remove() {},
+    setView() {},
+    fitBounds() {},
+    latLngToLayerPoint(value) {
+      const lat = Array.isArray(value) ? value[0] : value.lat;
+      const lng = Array.isArray(value) ? value[1] : value.lng;
+      return { x: lng * 1000, y: lat * 1000 };
+    },
+  });
+  const L = {
+    map: () => map,
+    tileLayer: () => evented({ addTo() { return this; } }),
+    layerGroup: () => ({ addTo() { return this; } }),
+    polyline: (points, options) => evented({
+      points,
+      options,
+      addTo() { polylines.push(this); return this; },
+      setLatLngs(next) { this.points = next; return this; },
+    }),
+    divIcon: options => ({ options }),
+    marker: (latlng, options) => evented({
+      options,
+      _latlng: { lat: +latlng[0], lng: +latlng[1] },
+      addTo() { markers.push(this); return this; },
+      bindTooltip() { return this; },
+      getLatLng() { return this._latlng; },
+      setLatLng(next) {
+        this._latlng = Array.isArray(next)
+          ? { lat: +next[0], lng: +next[1] } : { lat: +next.lat, lng: +next.lng };
+        return this;
+      },
+      dragging: { disable() {}, enable() {} },
+    }),
+  };
+  return { L, map, markers, polylines };
+}
+
+async function leafletControlsEditDraftWithoutHttp() {
+  const { context, state, calls } = routeCardHarness();
+  context.routeCardStartGeometryEdit();
+  const leaflet = fakeLeaflet();
+  const canvas = { hidden: true };
+  const fallback = { hidden: false };
+  const warning = { hidden: true, textContent: "" };
+  context.L = leaflet.L;
+  context.document.querySelector = selector => ({
+    ".route-map-canvas": canvas,
+    ".route-map-fallback": fallback,
+    ".route-map-warning": warning,
+  })[selector] || null;
+
+  context.routeCardBindMap(state);
+  const stopMarker = leaflet.markers.find(marker =>
+    marker.options.icon.options.className.includes("route-map-marker"));
+  const controlMarker = leaflet.markers.find(marker =>
+    marker.options.icon.options.className.includes("route-geometry-control"));
+  assert.ok(stopMarker && controlMarker);
+  assert.equal(stopMarker.options.draggable, false);
+  assert.equal(controlMarker.options.draggable, true);
+  assert.equal(controlMarker.options.keyboard, true);
+
+  controlMarker.fire("click", { originalEvent: { stopPropagation() {} } });
+  assert.equal(state.geometryEditor.draft.selectedIndex, controlMarker.options.geometryIndex);
+  controlMarker._latlng = { lng: 35.911, lat: 56.811 };
+  await controlMarker.fire("dragend", { target: controlMarker });
+  assert.deepEqual(
+    state.geometryEditor.draft.coordinates[controlMarker.options.geometryIndex],
+    [35.911, 56.811],
+  );
+
+  const currentLine = leaflet.polylines.find(line => line.options.color === "#2563eb");
+  assert.ok(currentLine);
+  currentLine.fire("click", { latlng: { lng: 35.905, lat: 56.805 } });
+  assert.equal(state.geometryEditor.draft.userIndexes.size, 1);
+  assert.notEqual(state.geometryEditor.draft.selectedIndex, null);
+  context.routeCardDeleteGeometryPoint();
+  assert.equal(state.geometryEditor.draft.userIndexes.size, 0);
+  assert.equal(calls.filter(call => call.kind === "api").length, 0);
+}
+
 const scenarios = {
   save_conflict: saveKeepsDraftAfterConflict,
   save_success: saveClosesOnlyAfterSuccessfulResponse,
@@ -189,6 +280,7 @@ const scenarios = {
   reset: resetRequiresConfirmationAndVersion,
   osrm_guard: osrmGuardsDirtyDraftAndSendsGeometryVersion,
   read_only: readOnlyRoleCannotStartEditing,
+  leaflet_controls: leafletControlsEditDraftWithoutHttp,
 };
 
 const scenario = process.argv[2];

@@ -48,6 +48,7 @@ def test_route_geometry_editor_behavior(scenario):
         "reset",
         "osrm_guard",
         "read_only",
+        "leaflet_controls",
     ],
 )
 def test_route_geometry_ui_behavior(scenario):
@@ -63,3 +64,20 @@ def test_route_geometry_ui_behavior(scenario):
         check=False,
     )
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_route_geometry_leaflet_controls_and_editor_styles_are_integrated():
+    source = (ROOT / "static" / "route-card.js").read_text(encoding="utf-8")
+    styles = (ROOT / "static" / "styles.css").read_text(encoding="utf-8")
+
+    assert "RouteGeometryEditor.visibleVertexIndexes" in source
+    assert "RouteGeometryEditor.nearestSegmentIndex" in source
+    assert "routeCardDeleteGeometryPoint" in source
+    assert 'currentLine.on("click"' in source
+    assert 'controlMarker.on("dragend"' in source
+    assert "routeCardGeometryKeydown" in source
+    assert "120" in source
+    assert ".route-geometry-control" in styles
+    assert ".route-geometry-control.is-selected" in styles
+    assert ".route-geometry-editor" in styles
+    assert ".route-osrm-preview" in styles
