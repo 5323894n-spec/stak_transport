@@ -81,3 +81,14 @@ def test_route_geometry_leaflet_controls_and_editor_styles_are_integrated():
     assert ".route-geometry-control.is-selected" in styles
     assert ".route-geometry-editor" in styles
     assert ".route-osrm-preview" in styles
+
+
+def test_geometry_editor_loads_before_route_card_with_matching_cache_keys():
+    index = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
+    editor = "/static/route-geometry-editor.js?v=1.0"
+    card = "/static/route-card.js?v=4.1"
+
+    assert editor in index and card in index
+    assert index.index(editor) < index.index(card)
+    assert "styles.css?v=3.3&amp;route=4.1" in index
+    assert "app.js?v=3.2&amp;route=4.1" in index
