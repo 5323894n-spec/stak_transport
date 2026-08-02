@@ -26,7 +26,12 @@ async function api(path, opts = {}) {
   const r = await fetch(path, opts);
   if (r.status === 401) { showLogin(); throw new Error("Требуется вход"); }
   const data = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error(data.detail || ("Ошибка " + r.status));
+  if (!r.ok) {
+    const error = new Error(data.detail || ("Ошибка " + r.status));
+    error.status = r.status;
+    error.data = data;
+    throw error;
+  }
   return data;
 }
 const openWin = (path) => window.open(path + (path.includes("?") ? "&" : "?") + "token=" + TOKEN, "_blank");

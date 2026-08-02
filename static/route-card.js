@@ -22,7 +22,8 @@ function routeCardState(routeId) {
   if (!window._routeCard || window._routeCard.routeId !== +routeId) {
     window._routeCard = {
       routeId: +routeId, tab: "passport", direction: "forward", network: null,
-      drafts: {}, osrmPreview: null, importPreview: null, geometry: null,
+      drafts: {}, osrmPreview: null, importPreview: null,
+      geometryEditor: { active: false, draft: null, error: "", saving: false },
       periodDay: "будни", periodDrafts: {}, periodTemplates: [],
       periodTemplateId: "", periodTemplatePreview: null,
       periodCalcPreview: null, periodError: "", periodContinuous: false,
@@ -81,6 +82,7 @@ VIEWS.routeCard = async function routeCardView(routeId) {
 
 async function routeCardTab(tab) {
   const state = window._routeCard;
+  if (tab !== state.tab && !routeCardConfirmGeometryDiscard(state)) return;
   state.tab = tab;
   renderRouteCard(state);
   if (tab === "periods" && !state.periodDrafts[state.periodDay]) {
@@ -93,14 +95,124 @@ async function routeCardTab(tab) {
 
 function routeCardDirection(direction) {
   const state = window._routeCard;
+  if (direction === state.direction) return;
+  if (!routeCardConfirmGeometryDiscard(state)) return;
   state.direction = direction;
   state.osrmPreview = null;
-  state.geometry = null;
+  routeCardClearGeometryEditor(state);
   renderRouteCard(state);
 }
 
 function routeCardCanEdit() {
   return !!USER && ["админ", "эксплуатация"].includes(USER.role);
+}
+
+function routeCardStoredGeometry(state, direction = state.direction) {
+  return state.network.geometries && state.network.geometries[direction];
+}
+
+function routeCardBaseGeometry(state) {
+  const stored = routeCardStoredGeometry(state);
+  if (stored) return stored.geometry;
+  return {
+    type: "LineString",
+    coordinates: routeCardDraft(state)
+      .filter(row => row.stop.longitude != null && row.stop.latitude != null)
+      .map(row => [+row.stop.longitude, +row.stop.latitude]),
+  };
+}
+
+function routeCardDisplayedGeometry(state) {
+  if (state.geometryEditor.active) {
+    return RouteGeometryEditor.geometryPayload(state.geometryEditor.draft);
+  }
+  return routeCardBaseGeometry(state);
+}
+
+function routeCardGeometryDirty(state = window._routeCard) {
+  return !!(state && state.geometryEditor.active
+    && RouteGeometryEditor.isDirty(state.geometryEditor.draft));
+}
+
+function routeCardConfirmGeometryDiscard(state = window._routeCard) {
+  return !routeCardGeometryDirty(state)
+    || confirm("Отменить несохранённые изменения линии трассы?");
+}
+
+function routeCardClearGeometryEditor(state = window._routeCard) {
+  state.geometryEditor = { active: false, draft: null, error: "", saving: false };
+}
+
+function routeCardStartGeometryEdit() {
+  const state = window._routeCard;
+  const rows = routeCardDraft(state);
+  if (!routeCardCanEdit() || state.osrmPreview || rows.length < 2
+      || rows.some(row => row.stop.longitude == null || row.stop.latitude == null)) return;
+  const stored = routeCardStoredGeometry(state);
+  const anchors = rows.map(row => [+row.stop.longitude, +row.stop.latitude]);
+  state.geometryEditor = {
+    active: true,
+    draft: RouteGeometryEditor.createDraft(
+      stored ? stored.geometry : routeCardBaseGeometry(state),
+      anchors,
+      stored ? stored.version : 0,
+    ),
+    error: "",
+    saving: false,
+  };
+  renderRouteCard(state);
+}
+
+async function routeCardSaveGeometry() {
+  const state = window._routeCard, editor = state.geometryEditor;
+  if (!editor.active || editor.saving) return;
+  editor.saving = true;
+  editor.error = "";
+  renderRouteCard(state);
+  try {
+    await api(`/api/routes/${state.routeId}/geometry/${state.direction}`, {
+      method: "PUT",
+      body: {
+        geometry: RouteGeometryEditor.geometryPayload(editor.draft),
+        expected_version: editor.draft.version,
+      },
+    });
+    routeCardClearGeometryEditor(state);
+    toast("Линия трассы сохранена");
+    await routeCardReload();
+  } catch (error) {
+    editor.error = error.status === 409
+      ? "Линия уже изменена другим пользователем. Ваш черновик сохранён на экране; обновите данные после визуальной проверки"
+      : error.message;
+    editor.saving = false;
+    renderRouteCard(state);
+  }
+}
+
+function routeCardCancelGeometryEdit() {
+  const state = window._routeCard;
+  if (!routeCardConfirmGeometryDiscard(state)) return;
+  routeCardClearGeometryEditor(state);
+  renderRouteCard(state);
+}
+
+async function routeCardResetGeometry() {
+  const state = window._routeCard, stored = routeCardStoredGeometry(state);
+  if (!stored || !routeCardCanEdit()) return;
+  if (!confirm("Сбросить сохранённую линию трассы?")) return;
+  await api(`/api/routes/${state.routeId}/geometry/${state.direction}`, {
+    method: "DELETE",
+    body: { expected_version: stored.version },
+  });
+  routeCardClearGeometryEditor(state);
+  toast("Сохранённая линия трассы сброшена");
+  await routeCardReload();
+}
+
+function routeCardBack() {
+  if (!routeCardConfirmGeometryDiscard()) return;
+  routeCardClearGeometryEditor();
+  history.back();
 }
 
 function routeCardDocumentFocusable() {
@@ -181,7 +293,7 @@ function routeCardDocumentDialog(state) {
 
 function routeCardHeader(state) {
   const r = state.network.route, f = state.network.forward.length, b = state.network.backward.length;
-  return `<header class="route-card-head"><div><button class="btn ghost" onclick="history.back()">← Назад</button>
+  return `<header class="route-card-head"><div><button class="btn ghost" onclick="routeCardBack()">← Назад</button>
     <h2>Маршрут № ${esc(r.number)} · ${esc(r.name || "без названия")}</h2>
     <p>${esc(r.work_days || "режим работы не указан")} · ${esc(r.season || "сезонность не указана")}</p></div>
     <div class="route-card-head-actions"><button class="btn sec route-document-open" onclick="routeCardOpenDocumentDialog()">Экспорт документов</button><div class="route-card-status"><span class="badge ${r.active === 0 ? "b-mut" : "b-ok"}">${r.active === 0 ? "неактивен" : "действует"}</span></div></div></header>
@@ -605,9 +717,19 @@ function routeCardFallbackMap(state, plotted = routeMapPoints(state)) {
 
 function routeCardMap(state) {
   const plotted = routeMapPoints(state), missing = routeCardDraft(state).length - plotted.rows.length;
-  const geo = state.geometry ? `<span class="badge b-inf">OSRM: ${esc(state.geometry.type || "геометрия получена")}</span>` : "";
+  const stored = routeCardStoredGeometry(state);
+  const geo = `<span class="badge b-inf">${esc(RouteGeometryEditor.sourceLabel(stored && stored.source))}</span>`;
+  const edit = routeCardCanEdit() && !missing && plotted.rows.length > 1 && !state.geometryEditor.active
+    ? `<button class="btn sec" onclick="routeCardStartGeometryEdit()" ${state.osrmPreview ? "disabled" : ""}>Корректировать линию</button>` : "";
+  const reset = routeCardCanEdit() && stored && !state.geometryEditor.active
+    ? '<button class="btn sec" onclick="routeCardResetGeometry()">Сбросить линию</button>' : "";
+  const editor = state.geometryEditor.active ? `<div class="route-geometry-editor" role="region" aria-label="Редактор линии трассы">
+    <span>Черновик линии можно сохранить или отменить.</span>
+    <button class="btn sec" onclick="routeCardCancelGeometryEdit()" ${state.geometryEditor.saving ? "disabled" : ""}>Отменить изменения</button>
+    <button class="btn" onclick="routeCardSaveGeometry()" ${state.geometryEditor.saving ? "disabled" : ""}>Сохранить линию</button>
+    ${state.geometryEditor.error ? `<div role="alert">${esc(state.geometryEditor.error)}</div>` : ""}</div>` : "";
   return `${routeDirectionSwitch(state)}<div class="route-card-toolbar"><div><b>Координатная схема</b><div class="muted">Схема без географической подложки. Маркер можно перетащить; новые координаты сохранятся после отпускания.</div></div>
-    <button class="btn sec" onclick="routeCardOsrmPreview()">Рассчитать через OSRM</button></div>
+    <div>${edit}${reset}<button class="btn sec" onclick="routeCardOsrmPreview()">Рассчитать через OSRM</button></div></div>${editor}
     ${missing ? `<div class="vio w"><b>Не все остановки показаны</b>Без координат: ${missing}. Добавьте широту и долготу на вкладке остановок.</div>` : ""}
     <div class="vio w route-map-warning" role="status" aria-live="polite" hidden>Подложка OpenStreetMap недоступна</div>
     <div class="route-map"><div class="route-map-canvas" hidden></div><div class="route-map-fallback">${routeCardFallbackMap(state, plotted)}</div></div>
@@ -625,7 +747,7 @@ function routeCardDestroyMap() {
 }
 
 function routeCardGeometryPoints(state, rows) {
-  const coordinates = state.geometry && state.geometry.coordinates;
+  const coordinates = routeCardDisplayedGeometry(state).coordinates;
   if (Array.isArray(coordinates) && coordinates.length && coordinates.every(point =>
     Array.isArray(point) && point.length >= 2 && Number.isFinite(+point[0]) && Number.isFinite(+point[1]))) {
     return coordinates.map(point => [+point[1], +point[0]]);
@@ -771,19 +893,27 @@ function routeOsrmDiff(state) {
 
 async function routeCardOsrmPreview() {
   const state = window._routeCard;
+  if (!routeCardConfirmGeometryDiscard(state)) return;
+  routeCardClearGeometryEditor(state);
   state.osrmPreview = await api(`/api/routes/${state.routeId}/osrm/preview/${state.direction}`, { method: "POST" });
-  state.geometry = state.osrmPreview.geometry; renderRouteCard(state);
+  renderRouteCard(state);
 }
 
 function routeCardCancelOsrm() {
   window._routeCard.osrmPreview = null;
-  window._routeCard.geometry = null;
   renderRouteCard(window._routeCard);
 }
 
 async function routeCardOsrmApply() {
   const state = window._routeCard;
-  await api(`/api/routes/${state.routeId}/osrm/apply/${state.direction}`, { method: "POST", body: { preview_token: state.osrmPreview.preview_token } });
+  if (!state.osrmPreview || !confirm("Применить расчёт OSRM и заменить сохранённую линию трассы?")) return;
+  await api(`/api/routes/${state.routeId}/osrm/apply/${state.direction}`, {
+    method: "POST",
+    body: {
+      preview_token: state.osrmPreview.preview_token,
+      expected_geometry_version: state.osrmPreview.geometry_version,
+    },
+  });
   state.osrmPreview = null; toast("Расчёт OSRM применён"); await routeCardReload();
 }
 
@@ -1031,3 +1161,9 @@ function renderRouteCard(state) {
   $("content").innerHTML = `<div class="route-card">${routeCardHeader(state)}<nav class="route-tabs" aria-label="Разделы карточки маршрута">${tabs}</nav><div class="route-card-body">${routeCardBody(state)}</div></div>${routeCardDocumentDialog(state)}`;
   if (state.tab === "map") routeCardBindMap(state);
 }
+
+window.onbeforeunload = event => {
+  if (!routeCardGeometryDirty()) return;
+  event.preventDefault();
+  event.returnValue = "";
+};
