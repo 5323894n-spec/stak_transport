@@ -24,7 +24,7 @@ function routeCardState(routeId) {
       routeId: +routeId, tab: "passport", direction: "forward", network: null,
       drafts: {}, osrmPreview: null, importPreview: null,
       geometryEditor: { active: false, draft: null, error: "", saving: false },
-      mapTilesAvailable: true,
+      mapTilesAvailable: true, mapViewport: null,
       periodDay: "будни", periodDrafts: {}, periodTemplates: [],
       periodTemplateId: "", periodTemplatePreview: null,
       periodCalcPreview: null, periodError: "", periodContinuous: false,
@@ -142,6 +142,7 @@ function routeCardConfirmGeometryDiscard(state = window._routeCard) {
 
 function routeCardClearGeometryEditor(state = window._routeCard) {
   state.geometryEditor = { active: false, draft: null, error: "", saving: false };
+  state.mapViewport = null;
 }
 
 function routeCardStartGeometryEdit() {
@@ -770,6 +771,20 @@ function routeCardMap(state) {
 let routeMapInstance = null;
 let routeMapTileTimer = null;
 
+function routeCardRememberMapView(state, map = routeMapInstance) {
+  if (!state || !map || typeof map.getCenter !== "function"
+      || typeof map.getZoom !== "function") return;
+  const center = map.getCenter();
+  const zoom = map.getZoom();
+  if (!center || !Number.isFinite(+center.lat) || !Number.isFinite(+center.lng)
+      || !Number.isFinite(+zoom)) return;
+  state.mapViewport = {
+    latitude: +center.lat,
+    longitude: +center.lng,
+    zoom: +zoom,
+  };
+}
+
 function routeCardDestroyMap() {
   if (routeMapTileTimer) clearTimeout(routeMapTileTimer);
   routeMapTileTimer = null;
@@ -957,8 +972,14 @@ function routeCardBindMap(state) {
         renderRouteCard(state);
       });
     }
-    if (rows.length === 1) map.setView(line[0], 15);
-    else map.fitBounds(line, { padding: [36, 36], maxZoom: 17 });
+    const viewport = state.geometryEditor.active ? state.mapViewport : null;
+    if (viewport) {
+      map.setView([viewport.latitude, viewport.longitude], viewport.zoom, { animate: false });
+    } else if (rows.length === 1) {
+      map.setView(line[0], 15);
+    } else {
+      map.fitBounds(line, { padding: [36, 36], maxZoom: 17 });
+    }
     routeMapTileTimer = setTimeout(() => {
       if (!tileLoads && routeMapInstance === map) {
         routeCardDestroyMap();
@@ -1248,6 +1269,7 @@ function routeCardBody(state) {
 }
 
 function renderRouteCard(state) {
+  if (state.geometryEditor.active) routeCardRememberMapView(state);
   routeCardDestroyMap();
   const tabs = ROUTE_CARD_TABS.map(([key, label]) => `<button class="route-tab ${state.tab === key ? "on" : ""}" onclick="routeCardTab('${key}')">${esc(label)}</button>`).join("");
   $("content").innerHTML = `<div class="route-card">${routeCardHeader(state)}<nav class="route-tabs" aria-label="Разделы карточки маршрута">${tabs}</nav><div class="route-card-body">${routeCardBody(state)}</div></div>${routeCardDocumentDialog(state)}`;

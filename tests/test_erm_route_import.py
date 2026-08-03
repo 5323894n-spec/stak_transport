@@ -394,6 +394,44 @@ def test_erm_route_import_does_not_choose_ambiguous_same_name_stop(tmp_path):
     assert first_depot_out["external_code"] == "300"
 
 
+def test_erm_route_import_creates_new_route_stop_when_same_name_candidates_are_far_away(tmp_path):
+    client = make_client(tmp_path)
+
+    import app.db as db
+    con = db.connect()
+    try:
+        con.execute(
+            "INSERT INTO stops(external_code,name,address,latitude,longitude) "
+            "VALUES(?,?,?,?,?)",
+            ("OLD-A", "Автовокзал", "Другой город", 1.0, 1.0),
+        )
+        con.execute(
+            "INSERT INTO stops(external_code,name,address,latitude,longitude) "
+            "VALUES(?,?,?,?,?)",
+            ("OLD-B", "Автовокзал", "Другой район", 2.0, 2.0),
+        )
+        con.commit()
+    finally:
+        con.close()
+
+    response = client.post(
+        "/api/import/routes/erm",
+        files={"file": ("erm.xlsx", build_erm_workbook(), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+    )
+
+    assert response.status_code == 200, response.text
+    data = response.json()
+    assert data["network"]["status"] == "migrated"
+    assert data["network"]["forward_stops"] == 3
+    assert data["network"]["backward_stops"] == 2
+
+    network = client.get(f"/api/routes/{data['route_id']}/network").json()
+    imported = network["forward"][1]["stop"]
+    assert imported["name"] == "Автовокзал"
+    assert imported["external_code"] == "101"
+    assert imported["latitude"] == pytest.approx(56.802)
+
+
 def test_erm_import_unique_name_with_conflicting_discriminators_creates_new_stop(tmp_path):
     client = make_client(tmp_path)
 

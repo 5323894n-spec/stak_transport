@@ -544,6 +544,45 @@ def route_network_import_apply(route_id: int, payload: dict = Body(...),
         return {"ok": True, **result}
     finally:
         con.close()
+
+def _osrm_coordinate_problem(rows):
+    previous = None
+    for row in rows:
+        stop = row["stop"]
+        latitude = float(stop["latitude"])
+        longitude = float(stop["longitude"])
+        if abs(latitude) < 1e-9 and abs(longitude) < 1e-9:
+            return (
+                f"Остановка {row['sequence']} «{stop['name']}»: "
+                "вместо координат указано 0,0. Исправьте широту и долготу."
+            )
+        if previous is not None:
+            previous_stop = previous["stop"]
+            first_latitude = math.radians(float(previous_stop["latitude"]))
+            second_latitude = math.radians(latitude)
+            latitude_delta = second_latitude - first_latitude
+            longitude_delta = math.radians(
+                longitude - float(previous_stop["longitude"])
+            )
+            haversine = (
+                math.sin(latitude_delta / 2) ** 2
+                + math.cos(first_latitude) * math.cos(second_latitude)
+                * math.sin(longitude_delta / 2) ** 2
+            )
+            straight_km = 6371.0 * 2 * math.atan2(
+                math.sqrt(haversine), math.sqrt(max(0.0, 1.0 - haversine))
+            )
+            declared_km = float(row.get("distance_from_prev_km") or 0)
+            if declared_km > 0 and straight_km > max(10.0, declared_km * 5):
+                return (
+                    f"Остановка {row['sequence']} «{stop['name']}»: "
+                    f"координаты находятся в {straight_km:.1f} км от предыдущей "
+                    f"остановки при длине перегона {declared_km:.1f} км. "
+                    "Исправьте координаты перед расчётом OSRM."
+                )
+        previous = row
+    return None
+
 @router.post("/routes/{route_id}/osrm/preview/{direction}")
 def route_osrm_preview(route_id: int, direction: str, user=Depends(current_user)):
     require_write(user, "routes")
@@ -563,6 +602,10 @@ def route_osrm_preview(route_id: int, direction: str, user=Depends(current_user)
                 400,
                 "Не хватает координат остановок: " + ", ".join(map(str, missing)),
             )
+        coordinate_problem = _osrm_coordinate_problem(rows)
+        if coordinate_problem:
+            raise HTTPException(400, coordinate_problem)
+
         coordinates = [
             (row["stop"]["longitude"], row["stop"]["latitude"]) for row in rows
         ]

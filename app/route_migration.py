@@ -134,6 +134,8 @@ def _match_stop(row, existing):
             return nearby[0], []
         if len(nearby) > 1:
             return None, nearby
+        # Same name at a distant location is a different physical stop.
+        return None, []
     if len(named) == 1:
         return named[0], []
     if len(named) > 1:

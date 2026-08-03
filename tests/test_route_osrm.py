@@ -236,6 +236,35 @@ def test_osrm_preview_requires_coordinates(tmp_path):
     assert "координат" in response.json()["detail"]
 
 
+
+
+def test_osrm_preview_rejects_coordinate_outlier_before_external_request(
+    tmp_path, monkeypatch,
+):
+    from app import osrm
+
+    client, route_id = make_client(tmp_path)
+    add_three_stop_trace(client, route_id)
+    network = client.get(f"/api/routes/{route_id}/network").json()
+    middle_stop_id = network["forward"][1]["stop"]["id"]
+    updated = client.put(f"/api/stops/{middle_stop_id}", json={
+        "latitude": 56.94577771717275,
+        "longitude": 35.15280271543731,
+    })
+    assert updated.status_code == 200, updated.text
+
+    called = False
+
+    def unexpected_request(*args, **kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("OSRM must not receive implausible coordinates")
+
+    monkeypatch.setattr(osrm, "request_route", unexpected_request)
+    response = client.post(f"/api/routes/{route_id}/osrm/preview/forward")
+
+    assert response.status_code == 400
+    assert called is False
 def test_osrm_timeout_is_reported_as_service_unavailable(tmp_path, monkeypatch):
     import app.osrm as osrm
 

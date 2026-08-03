@@ -1458,6 +1458,20 @@ def test_osrm_preview_is_stale_after_stop_coordinate_mutation(
 
     client = geometry_api["client"]
     route_id = geometry_api["route_id"]
+    network = client.get(f"/api/routes/{route_id}/network").json()
+    adjusted = client.put(
+        f"/api/routes/{route_id}/stops/forward",
+        json={"items": [
+            {
+                "stop_id": row["stop"]["id"],
+                "sequence": row["sequence"],
+                "distance_from_prev_km": 0 if row["sequence"] == 1 else 140,
+            }
+            for row in network["forward"]
+        ]},
+    )
+    assert adjusted.status_code == 200, adjusted.text
+
     monkeypatch.setattr(osrm, "request_route", lambda coordinates, **kwargs: {
         "geometry": _geometry([list(point) for point in coordinates]),
         "legs": [{"distance": 1400, "duration": 120}],

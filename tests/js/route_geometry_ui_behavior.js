@@ -273,6 +273,39 @@ async function leafletControlsEditDraftWithoutHttp() {
   assert.equal(calls.filter(call => call.kind === "api").length, 0);
 }
 
+
+function leafletViewportIsRestoredAfterGeometryRerender() {
+  const { context, state } = routeCardHarness();
+  context.routeCardStartGeometryEdit();
+  const leaflet = fakeLeaflet();
+  const canvas = { hidden: true };
+  const fallback = { hidden: false };
+  const warning = { hidden: true, textContent: "" };
+  context.L = leaflet.L;
+  context.document.querySelector = selector => ({
+    ".route-map-canvas": canvas,
+    ".route-map-fallback": fallback,
+    ".route-map-warning": warning,
+  })[selector] || null;
+  context.routeCardBindMap(state);
+
+  leaflet.map.getCenter = () => ({ lat: 56.805, lng: 35.905 });
+  leaflet.map.getZoom = () => 16;
+  context.routeCardRememberMapView(state, leaflet.map);
+  assert.deepEqual(plain(state.mapViewport), {
+    latitude: 56.805,
+    longitude: 35.905,
+    zoom: 16,
+  });
+
+  let restored = null;
+  leaflet.map.setView = (center, zoom, options) => {
+    restored = { center: plain(center), zoom, options: plain(options) };
+  };
+  leaflet.map.fitBounds = () => assert.fail("fitBounds resets the editor viewport");
+  context.routeCardBindMap(state);
+  assert.deepEqual(restored, { center: [56.805, 35.905], zoom: 16, options: { animate: false } });
+}
 const scenarios = {
   save_conflict: saveKeepsDraftAfterConflict,
   save_success: saveClosesOnlyAfterSuccessfulResponse,
@@ -281,6 +314,7 @@ const scenarios = {
   osrm_guard: osrmGuardsDirtyDraftAndSendsGeometryVersion,
   read_only: readOnlyRoleCannotStartEditing,
   leaflet_controls: leafletControlsEditDraftWithoutHttp,
+  viewport: leafletViewportIsRestoredAfterGeometryRerender,
 };
 
 const scenario = process.argv[2];
