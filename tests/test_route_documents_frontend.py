@@ -111,7 +111,7 @@ def test_route_document_asset_versions_are_bumped_without_leaflet_reordering():
 
     assert "styles.css?v=3.3&amp;route=4.1" in index
     assert "app.js?v=3.2&amp;route=4.1" in index
-    assert "route-card.js?v=4.2" in index
+    assert "route-card.js?v=4.3" in index
     assert index.index("/static/vendor/leaflet/leaflet.js") < index.index(
         "/static/route-card.js"
     )
@@ -151,3 +151,20 @@ def test_route_document_dialog_download_contract():
     ]
     assert "required" in date_control
     assert "setCustomValidity('')" in date_control
+
+
+def test_route_document_dialog_offers_both_word_passports():
+    source = _source("route-card.js")
+
+    assert '<option value="passport-d"' in source
+    assert '<option value="passport-f"' in source
+    assert "Паспорт маршрута Word — вариант D" in source
+    assert "Паспорт маршрута Word — вариант F" in source
+    assert "passport-document.docx" in source
+    assert 'state.documentType === "passport-d"' in source
+    assert 'state.documentType === "passport-f"' in source
+    passport_download = source[
+        source.index("const passportStyle ="):
+        source.index("routeCardCloseDocumentDialog();")
+    ]
+    assert "season" not in passport_download.split("} else {")[0]

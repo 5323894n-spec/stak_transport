@@ -65,3 +65,15 @@ state.documentDialogOpen = true; state.documentType = "erm"; state.documentSeaso
 vm.runInContext("routeCardDocumentDownload()", context);
 assert.deepEqual(downloads[1], { url: "/api/routes/17/erm-export.xlsx?season=summer&effective_date=2026-08-01", open: true });
 assert.equal(state.documentDialogOpen, false);
+
+state.documentDialogOpen = true; state.documentType = "passport-d"; state.documentSeason = "winter"; state.documentDate = "2026-08-03";
+vm.runInContext("routeCardDocumentDownload()", context);
+assert.deepEqual(downloads[2], { url: "/api/routes/17/passport-document.docx?style=D&effective_date=2026-08-03", open: true });
+assert.ok(!downloads[2].url.includes("season"), "passport URL must not carry a season");
+assert.equal(state.documentDialogOpen, false);
+
+state.documentDialogOpen = true; state.documentType = "passport-f"; state.documentSeason = "summer"; state.documentDate = "2026-08-03";
+vm.runInContext("routeCardDocumentDownload()", context);
+assert.deepEqual(downloads[3], { url: "/api/routes/17/passport-document.docx?style=F&effective_date=2026-08-03", open: true });
+assert.ok(!downloads[3].url.includes("season"), "passport URL must not carry a season");
+assert.equal(state.documentDialogOpen, false);

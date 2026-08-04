@@ -297,13 +297,25 @@ function routeCardDocumentDownload() {
     return;
   }
   if (dateInput) dateInput.setCustomValidity("");
-  const endpoint = state.documentType === "erm"
-    ? "erm-export.xlsx" : "schedule-document.xlsx";
-  const params = new URLSearchParams({
-    season: state.documentSeason,
-    effective_date: state.documentDate,
-  });
-  openWin(`/api/routes/${state.routeId}/${endpoint}?${params.toString()}`);
+  const passportStyle = state.documentType === "passport-d"
+    ? "D" : state.documentType === "passport-f" ? "F" : "";
+  if (passportStyle) {
+    const params = new URLSearchParams({
+      style: passportStyle,
+      effective_date: state.documentDate,
+    });
+    openWin(
+      `/api/routes/${state.routeId}/passport-document.docx?${params.toString()}`
+    );
+  } else {
+    const endpoint = state.documentType === "erm"
+      ? "erm-export.xlsx" : "schedule-document.xlsx";
+    const params = new URLSearchParams({
+      season: state.documentSeason,
+      effective_date: state.documentDate,
+    });
+    openWin(`/api/routes/${state.routeId}/${endpoint}?${params.toString()}`);
+  }
   routeCardCloseDocumentDialog();
 }
 
@@ -314,7 +326,7 @@ function routeCardDocumentDialog(state) {
       <h3 id="route-document-title">Экспорт документов</h3>
       <p class="muted">Выберите документ, сезон и дату начала действия.</p>
       <div class="route-document-fields">
-        <label for="route-document-kind">Документ<select id="route-document-kind" onchange="window._routeCard.documentType=this.value"><option value="schedule" ${state.documentType === "schedule" ? "selected" : ""}>Расписание</option><option value="erm" ${state.documentType === "erm" ? "selected" : ""}>ЭРМ</option></select></label>
+        <label for="route-document-kind">Документ<select id="route-document-kind" onchange="window._routeCard.documentType=this.value"><option value="schedule" ${state.documentType === "schedule" ? "selected" : ""}>Расписание</option><option value="erm" ${state.documentType === "erm" ? "selected" : ""}>ЭРМ</option><option value="passport-d" ${state.documentType === "passport-d" ? "selected" : ""}>Паспорт маршрута Word — вариант D</option><option value="passport-f" ${state.documentType === "passport-f" ? "selected" : ""}>Паспорт маршрута Word — вариант F</option></select></label>
         <label for="route-document-season">Сезон<select id="route-document-season" onchange="window._routeCard.documentSeason=this.value"><option value="winter" ${state.documentSeason === "winter" ? "selected" : ""}>Зима</option><option value="summer" ${state.documentSeason === "summer" ? "selected" : ""}>Лето</option></select></label>
         <label for="route-document-date">Дата начала действия<input id="route-document-date" type="date" required value="${esc(state.documentDate)}" onchange="this.setCustomValidity('');window._routeCard.documentDate=this.value"></label>
       </div>
