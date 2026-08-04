@@ -111,6 +111,16 @@ def _seed_document(con):
     return route_id
 
 
+def _database(tmp_path):
+    """Open a fresh database seeded with the shared demo route.
+
+    Returns ``(con, route_id)`` for tests that need both the live connection
+    and the seeded route, e.g. the route passport exporters.
+    """
+    con = _open_db(tmp_path)
+    return con, _seed_document(con)
+
+
 def _walk(value):
     yield value
     if is_dataclass(value):
@@ -173,7 +183,7 @@ def test_load_route_document_data_is_ordered_and_neutral(tmp_path):
     )
     assert len([
         sql for sql in statements if sql.lstrip().upper().startswith("SELECT")
-    ]) == 4
+    ]) == 5
     assert [row["name"] for row in document.forward.stops] == [
         "Вокзал",
         "Площадь",

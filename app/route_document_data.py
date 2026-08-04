@@ -3,6 +3,7 @@
 
 from dataclasses import dataclass
 import datetime
+import json
 from typing import Any
 
 from .route_depot import get_depot_rows
@@ -30,6 +31,14 @@ class DocumentOptions:
 class RouteSection:
     direction: str
     stops: tuple[dict[str, Any], ...]
+
+
+@dataclass(frozen=True)
+class RouteGeometryData:
+    direction: str
+    source: str
+    version: int
+    coordinates: tuple[tuple[float, float], ...]
 
 
 @dataclass(frozen=True)
@@ -65,6 +74,7 @@ class RouteDocumentData:
     depot_out: RouteSection
     depot_in: RouteSection
     schedules: dict[str, dict[str, tuple[ScheduleOutput, ...]]]
+    geometries: dict[str, "RouteGeometryData | None"]
 
 
 def parse_document_options(season, effective_date):
@@ -307,6 +317,36 @@ def _route_schedules(con, route_id):
         for outer_key, variants in grouped.items()
     }
 
+def _document_geometries(con, route_id):
+    """Read saved forward/backward geometry in one bounded query."""
+    rows = con.execute(
+        """
+        SELECT direction, geometry_json, source, version
+        FROM route_geometries
+        WHERE route_id=? AND direction IN ('forward','backward')
+        """,
+        (route_id,),
+    ).fetchall()
+    by_direction = {row["direction"]: row for row in rows}
+    values = {}
+    for direction in ("forward", "backward"):
+        row = by_direction.get(direction)
+        if row is None:
+            values[direction] = None
+            continue
+        coordinates = json.loads(row["geometry_json"])["coordinates"]
+        values[direction] = RouteGeometryData(
+            direction=direction,
+            source=str(row["source"]),
+            version=int(row["version"]),
+            coordinates=tuple(
+                (float(longitude), float(latitude))
+                for longitude, latitude in coordinates
+            ),
+        )
+    return values
+
+
 def load_route_document_data(con, route_id):
     """Load one route in a bounded set of deterministic SQL queries."""
     route = con.execute(
@@ -331,4 +371,5 @@ def load_route_document_data(con, route_id):
         depot_out=sections["depot_out"],
         depot_in=sections["depot_in"],
         schedules=_route_schedules(con, route_id),
+        geometries=_document_geometries(con, route_id),
     )
