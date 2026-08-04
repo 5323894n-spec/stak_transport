@@ -84,6 +84,33 @@ def test_passport_rejects_unknown_style(tmp_path):
         build_route_passport(data, options, style="X", tile_loader=_offline_tiles)
 
 
+def test_landscape_f_uses_wide_pages_and_same_stop_values(tmp_path):
+    con, route_id = _database(tmp_path)
+    try:
+        data = load_route_document_data(con, route_id)
+    finally:
+        con.close()
+    options = DocumentOptions(
+        "winter", "ЗИМНИЙ ПЕРИОД", "ЗИМА", datetime.date(2026, 8, 3)
+    )
+    d_payload = build_route_passport(
+        data, options, style="D", tile_loader=_offline_tiles
+    )
+    f_payload = build_route_passport(
+        data, options, style="F", tile_loader=_offline_tiles
+    )
+    d = Document(BytesIO(d_payload))
+    f = Document(BytesIO(f_payload))
+    assert f.sections[0].orientation == WD_ORIENT.LANDSCAPE
+    assert f.sections[0].page_width > f.sections[0].page_height
+    assert d.sections[0].page_width < d.sections[0].page_height
+    d_cells = _all_cells(d)
+    f_cells = _all_cells(f)
+    for value in ("Вокзал", "Аэропорт", "2.500"):
+        assert value in d_cells
+        assert value in f_cells
+
+
 def test_passport_requires_stops(tmp_path):
     con, _ = _database(tmp_path)
     try:
