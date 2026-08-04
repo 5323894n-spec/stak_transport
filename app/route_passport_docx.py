@@ -284,7 +284,10 @@ def _add_department_cover(document, data, options, profile):
         size=13,
     )
     document.add_paragraph()
-    _add_centered(document, options.season_label, size=12, color=profile.accent)
+    if options.season_label:
+        _add_centered(
+            document, options.season_label, size=12, color=profile.accent
+        )
     _add_centered(
         document,
         f"Дата введения: {options.effective_date.strftime('%d.%m.%Y')}",
@@ -312,7 +315,7 @@ def _add_technical_cover(document, data, options, profile):
         ("Длина обратного направления, км", _km(_direction_length_km(data.backward))),
         ("Вид сообщения", "регулярные перевозки пассажиров"),
         ("Дата введения", options.effective_date.strftime("%d.%m.%Y")),
-        ("Период действия", options.season_label),
+        ("Период действия", options.season_label or "круглогодично"),
         ("Редакция", str(data.version)),
     )
     _add_table(

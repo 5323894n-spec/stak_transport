@@ -81,6 +81,17 @@ def parse_document_options(season, effective_date):
     """Validate request options and return labels used by official documents."""
     if season not in _SEASONS:
         raise ValueError("Сезон должен быть winter или summer")
+    parsed_date = _parse_iso_date(effective_date)
+    season_label, file_token = _SEASONS[season]
+    return DocumentOptions(
+        season=season,
+        season_label=season_label,
+        file_token=file_token,
+        effective_date=parsed_date,
+    )
+
+
+def _parse_iso_date(effective_date):
     if not isinstance(effective_date, str):
         raise ValueError("Дата вступления в силу должна иметь формат YYYY-MM-DD")
     try:
@@ -91,12 +102,16 @@ def parse_document_options(season, effective_date):
         ) from None
     if parsed_date.isoformat() != effective_date:
         raise ValueError("Дата вступления в силу должна иметь формат YYYY-MM-DD")
-    season_label, file_token = _SEASONS[season]
+    return parsed_date
+
+
+def parse_passport_options(effective_date):
+    """Validate a passport date without leaking seasonal semantics."""
     return DocumentOptions(
-        season=season,
-        season_label=season_label,
-        file_token=file_token,
-        effective_date=parsed_date,
+        season="",
+        season_label="",
+        file_token="",
+        effective_date=_parse_iso_date(effective_date),
     )
 
 
