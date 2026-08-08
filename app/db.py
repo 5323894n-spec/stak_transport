@@ -225,6 +225,32 @@ CREATE TABLE IF NOT EXISTS exports_1c(
 CREATE TABLE IF NOT EXISTS notifications(
   id INTEGER PRIMARY KEY, ts TEXT, level TEXT DEFAULT 'info', category TEXT,
   message TEXT, seen INTEGER DEFAULT 0);
+
+CREATE TABLE IF NOT EXISTS fare_types(
+  id INTEGER PRIMARY KEY, code TEXT UNIQUE NOT NULL, name TEXT NOT NULL,
+  unit TEXT DEFAULT 'поездка', active INTEGER DEFAULT 1);
+
+CREATE TABLE IF NOT EXISTS fare_tariffs(
+  id INTEGER PRIMARY KEY, fare_type_id INTEGER NOT NULL,
+  valid_from TEXT NOT NULL, valid_to TEXT, price REAL NOT NULL,
+  active INTEGER DEFAULT 1, comment TEXT,
+  FOREIGN KEY(fare_type_id) REFERENCES fare_types(id) ON DELETE CASCADE);
+
+CREATE TABLE IF NOT EXISTS revenue_sheets(
+  id INTEGER PRIMARY KEY, number INTEGER UNIQUE NOT NULL,
+  waybill_id INTEGER NOT NULL, date TEXT NOT NULL,
+  driver_id INTEGER, bus_id INTEGER, route_id INTEGER, conductor_id INTEGER,
+  expected_amount REAL DEFAULT 0, submitted_amount REAL DEFAULT 0,
+  difference REAL DEFAULT 0, status TEXT DEFAULT 'черновик',
+  created_by TEXT, created_at TEXT, submitted_at TEXT,
+  reconciled_by TEXT, reconciled_at TEXT, cancel_reason TEXT, comment TEXT);
+
+CREATE TABLE IF NOT EXISTS revenue_lines(
+  id INTEGER PRIMARY KEY, sheet_id INTEGER NOT NULL,
+  fare_type_id INTEGER NOT NULL, tickets_count INTEGER NOT NULL DEFAULT 0,
+  unit_price REAL NOT NULL, amount REAL NOT NULL,
+  UNIQUE(sheet_id, fare_type_id),
+  FOREIGN KEY(sheet_id) REFERENCES revenue_sheets(id) ON DELETE CASCADE);
 """
 
 DEFAULT_NORMS = {
@@ -325,6 +351,9 @@ def init_db():
     migrate(con)
     migrate_route_network(con)
     con.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_notifications_source_key ON notifications(source_key)")
+    con.execute("CREATE INDEX IF NOT EXISTS idx_revenue_sheets_waybill ON revenue_sheets(waybill_id)")
+    con.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_revenue_sheet_active ON revenue_sheets(waybill_id) WHERE status<>'аннулирован'")
+    con.execute("CREATE INDEX IF NOT EXISTS idx_fare_tariffs_type_from ON fare_tariffs(fare_type_id, valid_from)")
     migrate_repairs(con)
     if not con.execute("SELECT 1 FROM norms").fetchone():
         con.execute(
