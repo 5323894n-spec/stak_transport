@@ -228,8 +228,32 @@ def _minimum_monotone_assignment(coordinates, anchors):
     return assignment
 
 
+def _collapse_adjacent_duplicates(coordinates):
+    """Убрать соседние точки в пределах допуска геометрии.
+
+    OSRM легитимно возвращает подряд идущие точки ближе допуска (доли метра,
+    на перекрёстках и разворотах). Строгий валидатор формы, применяемый к
+    ручному вводу, иначе отверг бы корректный результат маршрутизации.
+    """
+    collapsed = []
+    for point in coordinates:
+        if collapsed:
+            try:
+                if _coordinates_match(collapsed[-1], point):
+                    continue
+            except (TypeError, IndexError, ValueError):
+                pass
+        collapsed.append(point)
+    return collapsed
+
+
 def normalize_osrm_geometry(geometry, anchors):
     """Привязать геометрию OSRM к точным координатам остановок."""
+    if isinstance(geometry, dict) and isinstance(geometry.get("coordinates"), list):
+        geometry = {
+            **geometry,
+            "coordinates": _collapse_adjacent_duplicates(geometry["coordinates"]),
+        }
     coordinates = validate_geometry_shape(geometry)
     normalized_anchors = [
         _normalize_coordinate(anchor, number)

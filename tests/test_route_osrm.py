@@ -178,6 +178,34 @@ def test_normalize_osrm_geometry_snaps_ordered_anchors_and_preserves_shape():
     assert normalized["coordinates"][4] == anchors[2]
     assert [normalized["coordinates"][1], normalized["coordinates"][3]] == intermediate
 
+
+def test_normalize_osrm_geometry_collapses_subtolerance_duplicates():
+    from app import route_geometry
+
+    anchors = [[35.900, 56.800], [35.910, 56.810]]
+    # A real OSRM trace can emit two consecutive points within the geometry
+    # tolerance (sub-metre) — the shared strict validator must not reject it.
+    geometry = {"type": "LineString", "coordinates": [
+        [35.900, 56.800],
+        [35.905, 56.805],
+        [35.9050004, 56.8050004],  # within ANCHOR_TOLERANCE of the previous point
+        [35.910, 56.810],
+    ]}
+    assert route_geometry._coordinates_match(
+        geometry["coordinates"][1], geometry["coordinates"][2]
+    )
+
+    normalized = route_geometry.normalize_osrm_geometry(geometry, anchors)
+
+    coords = normalized["coordinates"]
+    assert coords[0] == anchors[0]
+    assert coords[-1] == anchors[-1]
+    for index in range(1, len(coords)):
+        assert not route_geometry._coordinates_match(
+            coords[index - 1], coords[index]
+        )
+
+
 def test_osrm_client_validates_and_normalizes_response(monkeypatch):
     import app.osrm as osrm
 
@@ -556,14 +584,17 @@ def test_normalize_osrm_geometry_breaks_ties_lexicographically_and_preserves_ver
 
 
 @pytest.mark.parametrize("duplicate", [[0, 0], [0.0000005, 0]])
-def test_normalize_osrm_geometry_rejects_adjacent_duplicate_vertices(duplicate):
-    from app.route_geometry import GeometryValidationError, normalize_osrm_geometry
+def test_normalize_osrm_geometry_collapses_adjacent_duplicate_vertices(duplicate):
+    # OSRM legitimately emits consecutive sub-tolerance points; the normaliser
+    # collapses them instead of rejecting a valid routing result.
+    from app.route_geometry import normalize_osrm_geometry
 
-    with pytest.raises(GeometryValidationError, match="Соседние координаты"):
-        normalize_osrm_geometry(
-            {"type": "LineString", "coordinates": [[0, 0], duplicate, [1, 0]]},
-            [[0, 0], [1, 0]],
-        )
+    normalized = normalize_osrm_geometry(
+        {"type": "LineString", "coordinates": [[0, 0], duplicate, [1, 0]]},
+        [[0, 0], [1, 0]],
+    )
+
+    assert normalized["coordinates"] == [[0.0, 0.0], [1.0, 0.0]]
 
 
 def test_normalize_osrm_geometry_rejects_unreasonably_complex_assignment(monkeypatch):
