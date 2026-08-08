@@ -172,6 +172,27 @@ def run():
                 waybill_close(w["id"], {"odo_end": round((w["odo_start"] or 0) + dist, 1),
                                         "fuel_given": given, "fuel_end": fuel_end,
                                         "depart_fact": w["depart_plan"], "return_fact": w["return_plan"]}, ADMIN)
+    from . import revenue_service as _rs
+    rc = db.connect()
+    try:
+        if rc.execute("SELECT 1 FROM fare_types").fetchone() is None:
+            specs = [("single", "Разовый", "поездка", 32.0),
+                     ("child", "Детский", "поездка", 16.0),
+                     ("baggage", "Багаж", "место", 20.0),
+                     ("month", "Проездной месячный", "месяц", 1900.0)]
+            type_ids = {}
+            for code, name, unit, price in specs:
+                ft = _rs.upsert_fare_type(rc, code=code, name=name, unit=unit)
+                _rs.add_tariff(rc, fare_type_id=ft, valid_from="2026-01-01", price=price)
+                type_ids[code] = ft
+            last_wb = rc.execute("SELECT id FROM waybills ORDER BY id DESC LIMIT 1").fetchone()
+            if last_wb is not None:
+                sid = _rs.create_sheet_from_waybill(rc, last_wb["id"], created_by="admin")
+                _rs.set_sheet_lines(rc, sid, [(type_ids["single"], 120), (type_ids["child"], 25)])
+                _rs.submit_sheet(rc, sid, 4000.0, user="admin")
+            rc.commit()
+    finally:
+        rc.close()
     con.close()
     print("Демо-данные загружены: маршрутов 6, автобусов 20, водителей 30.")
     print("Пользователи: admin/admin, dispatcher/12345, ekspl/12345, kadry/12345, buh/12345, mech/12345, med/12345, fuel/12345, dir/12345")
