@@ -331,6 +331,7 @@ MIGRATIONS = [
     ("routes", "stops_back", "TEXT"),
     ("routes", "length_back_km", "REAL"),
     ("routes", "trip_time_back_min", "INTEGER"),
+    ("routes", "comment", "TEXT"),
     ("roster", "break_min", "INTEGER DEFAULT 0"),
     ("summary_schedules", "filters_json", "TEXT DEFAULT '{}'"),
     ("summary_schedule_lines", "service_date", "TEXT"),

@@ -273,6 +273,29 @@ def route_network(route_id: int, user=Depends(current_user)):
         con.close()
 
 
+@router.put("/routes/{route_id}/comment")
+def route_comment_update(
+    route_id: int, payload: dict = Body(...), user=Depends(current_user)
+):
+    require_write(user, "routes")
+    comment = payload.get("comment")
+    comment = None if comment is None else str(comment).strip()
+    con = db.connect()
+    try:
+        old = _route_or_404(con, route_id)
+        con.execute(
+            "UPDATE routes SET comment=? WHERE id=?", (comment, route_id)
+        )
+        db.audit(
+            con, user["username"], "примечание маршрута", "routes", route_id,
+            old={"comment": old.get("comment")}, new={"comment": comment},
+        )
+        con.commit()
+        return {"ok": True, "route_id": route_id, "comment": comment}
+    finally:
+        con.close()
+
+
 @router.put("/routes/{route_id}/stops/{direction}")
 def route_stops_replace(route_id: int, direction: str, payload: dict = Body(...),
                         user=Depends(current_user)):
