@@ -92,4 +92,4 @@ def test_geometry_editor_loads_before_route_card_with_matching_cache_keys():
     assert editor in index and card in index
     assert index.index(editor) < index.index(card)
     assert "styles.css?v=3.3&amp;route=4.1" in index
-    assert "app.js?v=3.2&amp;route=4.1" in index
+    assert "app.js?v=3.3&amp;route=4.1" in index

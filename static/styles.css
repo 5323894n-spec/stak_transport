@@ -365,3 +365,16 @@ label.f > * { display: block; width: 100%; margin-top: 3px; color: var(--text); 
   }
   .schedule-stop-time-manual { background: #fff !important; box-shadow: inset 2px 0 #555; }
 }
+
+/* Модуль выручки */
+.revenue-tab { padding: 8px 0; }
+.revenue-tab table { width: 100%; border-collapse: collapse; margin-top: 8px; }
+.revenue-tab th, .revenue-tab td { border: 1px solid #d8dee6; padding: 4px 8px; text-align: left; vertical-align: top; }
+.revenue-tab td.num { text-align: right; font-variant-numeric: tabular-nums; }
+.revenue-shortage { color: #b3261e; font-weight: 600; }
+.revenue-status { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 12px; background: #eef2f7; }
+.revenue-status-сдан { background: #fff4d6; }
+.revenue-status-сверен { background: #eaf4ea; }
+.revenue-status-аннулирован { background: #fdecec; color: #8a1f1f; }
+@media (max-width: 760px) { .revenue-tab table { font-size: 13px; } }
+@media print { .revenue-tab .revenue-toolbar { display: none; } }

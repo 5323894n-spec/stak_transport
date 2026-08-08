@@ -37,5 +37,5 @@ def test_vehicle_card_has_route_tabs_search_incidents_gallery_and_exports():
 
 def test_index_uses_vehicle_card_cache_version():
     html = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
-    assert '/static/app.js?v=3.2' in html
+    assert '/static/app.js?v=3.3' in html
     assert '/static/styles.css?v=3.3' in html
