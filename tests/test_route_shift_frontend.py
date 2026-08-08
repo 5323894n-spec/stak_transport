@@ -79,4 +79,4 @@ def test_schedule_assets_use_route_cache_version_3_9():
 
     assert 'styles.css?v=3.3&amp;route=4.1' in index
     assert 'app.js?v=3.3&amp;route=4.1' in index
-    assert 'route-card.js?v=4.3' in index
+    assert 'route-card.js?v=4.4' in index

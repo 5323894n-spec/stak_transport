@@ -378,3 +378,7 @@ label.f > * { display: block; width: 100%; margin-top: 3px; color: var(--text); 
 .revenue-status-аннулирован { background: #fdecec; color: #8a1f1f; }
 @media (max-width: 760px) { .revenue-tab table { font-size: 13px; } }
 @media print { .revenue-tab .revenue-toolbar { display: none; } }
+
+/* Паспорт маршрута: действия и примечание */
+.route-passport-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 6px; }
+.route-comment { width: 100%; box-sizing: border-box; resize: vertical; font: inherit; padding: 6px 8px; }

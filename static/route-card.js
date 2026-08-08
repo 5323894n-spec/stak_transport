@@ -346,17 +346,59 @@ function routeCardHeader(state) {
     <div class="card"><div class="num">${Number(state.network.totals.backward_km || 0).toLocaleString("ru-RU")}</div><div class="lbl">км обратно</div></div></div>`;
 }
 
+function routeCardCommentValue(r) {
+  if (r.comment != null && String(r.comment).trim() !== "") return r.comment;
+  const notes = r.notes == null ? "" : String(r.notes);
+  // ERM-импортированные маршруты хранят в notes служебный JSON — не показываем его как текст
+  return notes.trim().startsWith("{") ? "" : notes;
+}
+
+function routeCardGeneratePassport(style) {
+  const state = window._routeCard;
+  const params = new URLSearchParams({
+    style, effective_date: routeCardDocumentToday(),
+  });
+  openWin(`/api/routes/${state.routeId}/passport-document.docx?${params.toString()}`);
+}
+
+async function routeCardSaveComment() {
+  const state = window._routeCard;
+  const field = document.getElementById("route-comment");
+  const value = field ? field.value : "";
+  try {
+    await api(`/api/routes/${state.routeId}/comment`, {
+      method: "PUT", body: { comment: value },
+    });
+    state.network.route.comment = value.trim();
+    toast("Примечание сохранено");
+  } catch (error) {
+    toast(error.message, true);
+  }
+}
+
 function routeCardPassport(state) {
   const r = state.network.route;
-  return `<div class="route-passport"><section class="panel"><h3>Основные сведения</h3><dl class="kv">
+  const canEdit = routeCardCanEdit();
+  const comment = routeCardCommentValue(r);
+  return `<div class="route-passport">
+    <section class="panel"><h3>Паспорт маршрута (Word)</h3>
+      <p class="muted">Официальная форма паспорта маршрута регулярного сообщения.</p>
+      <div class="route-passport-actions">
+        <button class="btn" onclick="routeCardGeneratePassport('D')">Сформировать паспорт (портрет, D)</button>
+        <button class="btn sec" onclick="routeCardGeneratePassport('F')">Паспорт (ландшафт, F)</button>
+      </div></section>
+    <section class="panel"><h3>Основные сведения</h3><dl class="kv">
     <dt>Номер</dt><dd>${esc(r.number)}</dd><dt>Наименование</dt><dd>${esc(r.name)}</dd>
     <dt>Тип перевозок</dt><dd>${esc(r.transport_type || r.route_type || "—")}</dd>
     <dt>Дни работы</dt><dd>${esc(r.work_days || "—")}</dd><dt>Сезонность</dt><dd>${esc(r.season || "—")}</dd>
     <dt>Допустимые автобусы</dt><dd>${esc(r.bus_types || "—")}</dd><dt>Версия</dt><dd>${esc(r.version || 1)}</dd></dl></section>
     <section class="panel"><h3>Плановые показатели</h3><dl class="kv">
     <dt>Интервал</dt><dd>${esc(r.interval_min || "—")} мин</dd><dt>Выходов</dt><dd>${esc(r.outputs_count || "—")}</dd>
-    <dt>Время прямо</dt><dd>${esc(r.trip_time_min || "—")} мин</dd><dt>Время обратно</dt><dd>${esc(r.trip_time_back_min || "—")} мин</dd>
-    <dt>Примечания</dt><dd>${esc(r.notes || "—")}</dd></dl></section></div>`;
+    <dt>Время прямо</dt><dd>${esc(r.trip_time_min || "—")} мин</dd><dt>Время обратно</dt><dd>${esc(r.trip_time_back_min || "—")} мин</dd></dl></section>
+    <section class="panel"><h3>Примечания</h3>
+      <textarea id="route-comment" class="route-comment" rows="3" ${canEdit ? "" : "readonly"} placeholder="Произвольное примечание к маршруту">${esc(comment)}</textarea>
+      ${canEdit ? `<div class="route-passport-actions"><button class="btn sec" onclick="routeCardSaveComment()">Сохранить примечание</button></div>` : ""}
+    </section></div>`;
 }
 
 function routeDirectionSwitch(state) {

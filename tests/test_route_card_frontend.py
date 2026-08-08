@@ -9,7 +9,7 @@ def test_route_card_assets_and_entry_points_are_served():
     index = client.get("/")
     assert index.status_code == 200
     assert "/static/route-card.js" in index.text
-    assert '/static/route-card.js?v=4.3' in index.text
+    assert '/static/route-card.js?v=4.4' in index.text
 
     asset = client.get("/static/route-card.js")
     assert asset.status_code == 200

@@ -87,7 +87,7 @@ def test_route_geometry_leaflet_controls_and_editor_styles_are_integrated():
 def test_geometry_editor_loads_before_route_card_with_matching_cache_keys():
     index = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
     editor = "/static/route-geometry-editor.js?v=1.0"
-    card = "/static/route-card.js?v=4.3"
+    card = "/static/route-card.js?v=4.4"
 
     assert editor in index and card in index
     assert index.index(editor) < index.index(card)

@@ -111,7 +111,7 @@ def test_route_document_asset_versions_are_bumped_without_leaflet_reordering():
 
     assert "styles.css?v=3.3&amp;route=4.1" in index
     assert "app.js?v=3.3&amp;route=4.1" in index
-    assert "route-card.js?v=4.3" in index
+    assert "route-card.js?v=4.4" in index
     assert index.index("/static/vendor/leaflet/leaflet.js") < index.index(
         "/static/route-card.js"
     )
