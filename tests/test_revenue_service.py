@@ -77,3 +77,95 @@ def test_add_tariff_rejects_negative_price(tmp_path):
             rs.add_tariff(con, fare_type_id=ft, valid_from="2026-01-01", price=-1.0)
     finally:
         con.close()
+
+
+def _seed_waybill(con, *, date="2026-08-07", number=5001):
+    driver_id = con.execute(
+        "INSERT INTO drivers(tab_number, fio) VALUES(?,?)", ("Т1", "Иванов")
+    ).lastrowid
+    bus_id = con.execute(
+        "INSERT INTO buses(garage_number, plate) VALUES(?,?)", ("Г1", "A001")
+    ).lastrowid
+    route_id = con.execute(
+        "INSERT INTO routes(number, name) VALUES(?,?)", ("42", "Центр")
+    ).lastrowid
+    con.execute(
+        "INSERT INTO waybills(number, date, driver_id, bus_id, route_id, status) "
+        "VALUES(?,?,?,?,?,?)",
+        (number, date, driver_id, bus_id, route_id, "оформлен"),
+    )
+    wid = con.execute("SELECT id FROM waybills WHERE number=?", (number,)).fetchone()["id"]
+    return wid, route_id
+
+
+def _fare(con, code, price, valid_from="2026-01-01"):
+    ft = rs.upsert_fare_type(con, code=code, name=code, unit="поездка")
+    rs.add_tariff(con, fare_type_id=ft, valid_from=valid_from, price=price)
+    return ft
+
+
+def test_create_sheet_copies_waybill_fields(tmp_path):
+    con = _open_db(tmp_path)
+    try:
+        wid, route_id = _seed_waybill(con, date="2026-08-07")
+        sheet_id = rs.create_sheet_from_waybill(con, wid, created_by="admin")
+        con.commit()
+        sheet = rs.get_sheet(con, sheet_id)
+        assert sheet["date"] == "2026-08-07"
+        assert sheet["route_id"] == route_id
+        assert sheet["status"] == "черновик"
+        assert sheet["number"] >= 1
+    finally:
+        con.close()
+
+
+def test_create_sheet_rejects_second_active_sheet(tmp_path):
+    con = _open_db(tmp_path)
+    try:
+        wid, _ = _seed_waybill(con)
+        rs.create_sheet_from_waybill(con, wid, created_by="admin")
+        con.commit()
+        with pytest.raises(rs.RevenueError):
+            rs.create_sheet_from_waybill(con, wid, created_by="admin")
+    finally:
+        con.close()
+
+
+def test_create_sheet_unknown_waybill(tmp_path):
+    con = _open_db(tmp_path)
+    try:
+        with pytest.raises(rs.RevenueError):
+            rs.create_sheet_from_waybill(con, 999999, created_by="admin")
+    finally:
+        con.close()
+
+
+def test_set_lines_computes_amounts_from_tariff_on_date(tmp_path):
+    con = _open_db(tmp_path)
+    try:
+        wid, _ = _seed_waybill(con, date="2026-08-07")
+        single = _fare(con, "single", 30.0)
+        child = _fare(con, "child", 15.0)
+        sheet_id = rs.create_sheet_from_waybill(con, wid, created_by="admin")
+        sheet = rs.set_sheet_lines(con, sheet_id, [(single, 100), (child, 20)])
+        con.commit()
+        assert sheet["expected_amount"] == 30.0 * 100 + 15.0 * 20
+        amounts = {ln["fare_type_id"]: ln["amount"] for ln in sheet["lines"]}
+        assert amounts[single] == 3000.0
+    finally:
+        con.close()
+
+
+def test_set_lines_rejects_negative_and_missing_tariff(tmp_path):
+    con = _open_db(tmp_path)
+    try:
+        wid, _ = _seed_waybill(con, date="2026-08-07")
+        single = _fare(con, "single", 30.0)
+        no_tariff = rs.upsert_fare_type(con, code="none", name="Нет", unit="поездка")
+        sheet_id = rs.create_sheet_from_waybill(con, wid, created_by="admin")
+        with pytest.raises(rs.RevenueError):
+            rs.set_sheet_lines(con, sheet_id, [(single, -1)])
+        with pytest.raises(rs.RevenueError):
+            rs.set_sheet_lines(con, sheet_id, [(no_tariff, 5)])
+    finally:
+        con.close()
