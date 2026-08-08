@@ -11,10 +11,11 @@ def _open_db(tmp_path):
 def _seed_sheet(con, route_number, amount, date="2026-08-07"):
     from app import revenue_service as rs
     driver_id = con.execute(
-        "INSERT INTO drivers(tab_number, fio) VALUES(?,?)", ("Т", "И")
+        "INSERT INTO drivers(tab_number, fio) VALUES(?,?)", (f"Т{route_number}", "И")
     ).lastrowid
     bus_id = con.execute(
-        "INSERT INTO buses(garage_number, plate) VALUES(?,?)", ("Г", "P")
+        "INSERT INTO buses(garage_number, plate) VALUES(?,?)",
+        (f"Г{route_number}", f"P{route_number}"),
     ).lastrowid
     route_id = con.execute(
         "INSERT INTO routes(number, name) VALUES(?,?)", (route_number, "R")
