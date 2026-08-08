@@ -1,13 +1,6 @@
 # -*- coding: utf-8 -*-
-"""Editable Word route-passport builder with D (portrait) and F (landscape).
-
-The builder consumes the neutral :class:`RouteDocumentData` model and produces
-a standards-shaped route passport as an editable ``.docx`` package. Every
-administrative value that an operator must fill by hand is emitted as a blank,
-editable field; everything derivable from the route network is filled
-automatically. Direction pages embed a deterministic schematic plus an
-OpenStreetMap raster map that degrades to an offline scheme.
-"""
+"""Editable portrait Word passport for a regular public transport route."""
+from __future__ import annotations
 
 from dataclasses import dataclass
 from io import BytesIO
@@ -15,23 +8,16 @@ import re
 
 from docx import Document
 from docx.enum.section import WD_ORIENT
-from docx.enum.table import WD_CELL_VERTICAL_ALIGNMENT, WD_TABLE_ALIGNMENT
+from docx.enum.table import WD_ALIGN_VERTICAL
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import Cm, Pt, RGBColor
 
-from .route_passport_maps import render_direction_map, render_route_scheme
+from .route_passport_maps import RenderedMap, render_direction_map, render_route_scheme
 
-
-DOCX_MIME = (
-    "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-)
-
-_DIRECTION_LABELS = {
-    "forward": ("ПРЯМОГО", "прямое направление"),
-    "backward": ("ОБРАТНОГО", "обратное направление"),
-}
+DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+_ACCENT, _DARK, _FILL = "17365D", "10243E", "E8EEF5"
 
 
 @dataclass(frozen=True)
@@ -42,483 +28,260 @@ class PassportProfile:
     page_width_cm: float
     page_height_cm: float
     margin_cm: float
+    map_width_cm: float
 
 
-PROFILES = {
-    "D": PassportProfile("D", False, "1F4D78", 21.0, 29.7, 1.6),
-    "F": PassportProfile("F", True, "276678", 29.7, 21.0, 1.4),
-}
+PROFILES = (
+    PassportProfile("D", False, _ACCENT, 21.0, 29.7, 1.6, 17.8),
+    PassportProfile("F", True, "276678", 29.7, 21.0, 1.4, 26.9),
+)
+_BY_CODE = {profile.code: profile for profile in PROFILES}
 
 
-# --- Formatting helpers -------------------------------------------------------
+def _profile(style):
+    try:
+        return _BY_CODE[style]
+    except KeyError:
+        raise ValueError("Оформление паспорта должно быть D или F") from None
 
-def _safe_token(value):
-    token = re.sub(r"[^0-9A-Za-zА-Яа-яЁё._-]+", "_", str(value)).strip("_.")
-    return token or "без_номера"
 
+def _display_text(value):
+    """Return XML 1.0-safe text while retaining all legal Unicode and whitespace."""
+    if value is None:
+        return ""
+    return "".join(
+        character for character in str(value)
+        if character in "\t\n\r" or 0x20 <= ord(character) <= 0xD7FF
+        or 0xE000 <= ord(character) <= 0xFFFD or 0x10000 <= ord(character) <= 0x10FFFF
+    )
 
 def passport_filename(data, options, style):
-    return (
-        f"Паспорт_маршрута_{_safe_token(data.route_number)}_"
-        f"{style}_{options.effective_date.isoformat()}.docx"
-    )
+    _profile(style)
+    route = re.sub(r'[\\/:*?"<>|\x00-\x1f\x7f]+', "", _display_text(getattr(data, "route_number", ""))).strip()[:80] or "без_номера"
+    return f"Паспорт_маршрута_{route}_{style}_{options.effective_date.isoformat()}.docx"
 
 
-def _km(value):
-    if value in (None, ""):
-        return "—"
-    return f"{float(value):.3f}"
+def _font(font, size=None, bold=None, color=None):
+    font.name = "Arial"
+    for key in ("ascii", "hAnsi", "cs"):
+        font._element.rPr.rFonts.set(qn(f"w:{key}"), "Arial")
+    if size is not None: font.size = Pt(size)
+    if bold is not None: font.bold = bold
+    if color: font.color.rgb = RGBColor.from_string(color)
 
 
-def _coord(value):
-    if value in (None, ""):
-        return "—"
-    return f"{float(value):.6f}"
+def _section(section, profile):
+    section.orientation = WD_ORIENT.LANDSCAPE if profile.landscape else WD_ORIENT.PORTRAIT
+    section.page_width, section.page_height = Cm(profile.page_width_cm), Cm(profile.page_height_cm)
+    section.top_margin = section.bottom_margin = Cm(profile.margin_cm)
+    section.left_margin = section.right_margin = Cm(profile.margin_cm)
+    section.header_distance = section.footer_distance = Cm(0.8)
 
 
-def _text(value):
-    if value in (None, ""):
-        return "—"
-    return str(value)
+def _styles(doc, profile):
+    normal = doc.styles["Normal"]; _font(normal.font, 10.5)
+    normal.paragraph_format.space_after, normal.paragraph_format.line_spacing = Pt(4), 1.15
+    title = doc.styles["Title"]; _font(title.font, 20, True, profile.accent)
+    title.paragraph_format.alignment, title.paragraph_format.space_after = WD_ALIGN_PARAGRAPH.CENTER, Pt(6)
+    subtitle = doc.styles["Subtitle"]; _font(subtitle.font, 10.5, color=_DARK)
+    subtitle.paragraph_format.space_after = Pt(4)
+    for name, size, color, before, after in (("Heading 1", 15, profile.accent, 10, 6), ("Heading 2", 12, profile.accent, 8, 4), ("Heading 3", 10.5, _DARK, 6, 3)):
+        style = doc.styles[name]; _font(style.font, size, True, color)
+        style.paragraph_format.space_before, style.paragraph_format.space_after = Pt(before), Pt(after)
+        style.paragraph_format.line_spacing = 1.15
 
 
-def _content_width(profile):
-    return Cm(profile.page_width_cm - 2 * profile.margin_cm)
+def _page_field(paragraph):
+    run = OxmlElement("w:r")
+    for tag, value in (("fldChar", "begin"), ("instrText", " PAGE "), ("fldChar", "separate"), ("t", "1"), ("fldChar", "end")):
+        item = OxmlElement(f"w:{tag}")
+        if tag == "fldChar": item.set(qn("w:fldCharType"), value)
+        else: item.text = value
+        run.append(item)
+    paragraph._p.append(run)
 
 
-# --- Low-level document primitives -------------------------------------------
-
-def _configure_section(section, profile):
-    section.orientation = (
-        WD_ORIENT.LANDSCAPE if profile.landscape else WD_ORIENT.PORTRAIT
-    )
-    section.page_width = Cm(profile.page_width_cm)
-    section.page_height = Cm(profile.page_height_cm)
-    margin = Cm(profile.margin_cm)
-    section.left_margin = margin
-    section.right_margin = margin
-    section.top_margin = margin
-    section.bottom_margin = margin
+def _furniture(section, number):
+    header = section.header.paragraphs[0]; header.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+    header.add_run(f"Паспорт маршрута № {_display_text(number) or '________________'}")
+    footer = section.footer.paragraphs[0]; footer.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+    footer.add_run("Лист "); _page_field(footer)
 
 
-def _configure_styles(document, profile):
-    normal = document.styles["Normal"]
-    normal.font.name = "Arial"
-    normal.font.size = Pt(10)
-    rpr = normal.element.get_or_add_rPr()
-    rfonts = rpr.get_or_add_rFonts()
-    rfonts.set(qn("w:ascii"), "Arial")
-    rfonts.set(qn("w:hAnsi"), "Arial")
-    rfonts.set(qn("w:cs"), "Arial")
+def _shading(cell):
+    shd = OxmlElement("w:shd"); shd.set(qn("w:fill"), _FILL); shd.set(qn("w:val"), "clear")
+    cell._tc.get_or_add_tcPr().append(shd)
 
 
-def _add_page_number(section, profile):
-    paragraph = section.footer.paragraphs[0]
-    paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    paragraph.text = ""
-    _add_run(paragraph, "Страница ", size=8, color=profile.accent)
-    _add_field(paragraph, "PAGE")
-    _add_run(paragraph, " из ", size=8, color=profile.accent)
-    _add_field(paragraph, "NUMPAGES")
-
-
-def _add_field(paragraph, instruction):
-    run = paragraph.add_run()
-    begin = OxmlElement("w:fldChar")
-    begin.set(qn("w:fldCharType"), "begin")
-    instr = OxmlElement("w:instrText")
-    instr.set(qn("xml:space"), "preserve")
-    instr.text = f" {instruction} "
-    end = OxmlElement("w:fldChar")
-    end.set(qn("w:fldCharType"), "end")
-    run._r.append(begin)
-    run._r.append(instr)
-    run._r.append(end)
-
-
-def _add_run(paragraph, text, *, bold=False, size=10, color=None):
-    run = paragraph.add_run(text)
-    run.bold = bold
-    run.font.size = Pt(size)
-    if color:
-        run.font.color.rgb = RGBColor.from_string(color)
-    return run
-
-
-def _add_heading(document, text, profile, *, size=13, space_before=12):
-    paragraph = document.add_paragraph()
-    paragraph.paragraph_format.space_before = Pt(space_before)
-    paragraph.paragraph_format.space_after = Pt(6)
-    _add_run(paragraph, text, bold=True, size=size, color=profile.accent)
-    return paragraph
-
-
-def _add_centered(document, text, *, bold=False, size=12, color=None):
-    paragraph = document.add_paragraph()
-    paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    _add_run(paragraph, text, bold=bold, size=size, color=color)
-    return paragraph
-
-
-def _add_blank_field(document, label, *, lines=1):
-    paragraph = document.add_paragraph()
-    _add_run(paragraph, f"{label}: ", bold=True)
-    _add_run(paragraph, "_" * 48)
-    for _ in range(lines - 1):
-        extra = document.add_paragraph()
-        _add_run(extra, "_" * 72)
-    return paragraph
-
-
-def _add_page_break(document):
-    document.add_page_break()
-
-
-def _shade_cell(cell, color):
-    shading = OxmlElement("w:shd")
-    shading.set(qn("w:val"), "clear")
-    shading.set(qn("w:color"), "auto")
-    shading.set(qn("w:fill"), color)
-    cell._tc.get_or_add_tcPr().append(shading)
-
-
-def _repeat_table_header(row):
-    tr_pr = row._tr.get_or_add_trPr()
-    header = OxmlElement("w:tblHeader")
-    header.set(qn("w:val"), "true")
-    tr_pr.append(header)
-
-
-def _set_cell_margins(cell, *, top=40, bottom=40, left=80, right=80):
-    tc_pr = cell._tc.get_or_add_tcPr()
-    margins = OxmlElement("w:tcMar")
-    for side, value in (
-        ("top", top), ("bottom", bottom), ("start", left), ("end", right)
-    ):
-        node = OxmlElement(f"w:{side}")
-        node.set(qn("w:w"), str(value))
-        node.set(qn("w:type"), "dxa")
-        margins.append(node)
-    tc_pr.append(margins)
-
-
-def _add_table(document, headers, rows, widths, profile):
-    table = document.add_table(rows=1, cols=len(headers))
-    table.style = "Table Grid"
-    table.alignment = WD_TABLE_ALIGNMENT.CENTER
-    table.autofit = False
-    header_cells = table.rows[0].cells
-    for index, title in enumerate(headers):
-        cell = header_cells[index]
-        cell.text = ""
-        paragraph = cell.paragraphs[0]
-        paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        _add_run(paragraph, title, bold=True, size=9, color="FFFFFF")
-        _shade_cell(cell, profile.accent)
-        cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
-        _set_cell_margins(cell)
-    _repeat_table_header(table.rows[0])
-    for record in rows:
-        cells = table.add_row().cells
-        for index, value in enumerate(record):
-            cell = cells[index]
-            cell.text = ""
-            paragraph = cell.paragraphs[0]
-            _add_run(paragraph, str(value), size=9)
-            cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
-            _set_cell_margins(cell)
+def _geometry(table, widths):
+    total_width = sum(widths)
+    table.autofit = False; pr = table._tbl.tblPr
+    layout = pr.first_child_found_in("w:tblLayout")
+    if layout is None: layout = OxmlElement("w:tblLayout"); pr.append(layout)
+    layout.set(qn("w:type"), "fixed")
+    for name, width in (("tblW", total_width), ("tblInd", 120)):
+        node = pr.find(qn(f"w:{name}"))
+        if node is None: node = OxmlElement(f"w:{name}"); pr.append(node)
+        node.set(qn("w:w"), str(width)); node.set(qn("w:type"), "dxa")
+    grid = table._tbl.tblGrid
+    for node in list(grid): grid.remove(node)
+    for width in widths:
+        node = OxmlElement("w:gridCol"); node.set(qn("w:w"), str(width)); grid.append(node)
     for row in table.rows:
-        for index, width in enumerate(widths):
-            row.cells[index].width = Cm(width)
+        for cell, width in zip(row.cells, widths):
+            cell.vertical_alignment = WD_ALIGN_VERTICAL.CENTER
+            node = cell._tc.get_or_add_tcPr().find(qn("w:tcW")); node.set(qn("w:w"), str(width)); node.set(qn("w:type"), "dxa")
+    margins = OxmlElement("w:tblCellMar")
+    for name, value in (("top", 80), ("bottom", 80), ("start", 120), ("end", 120)):
+        node = OxmlElement(f"w:{name}"); node.set(qn("w:w"), str(value)); node.set(qn("w:type"), "dxa"); margins.append(node)
+    pr.append(margins)
+    borders = OxmlElement("w:tblBorders")
+    for name in ("top", "left", "bottom", "right", "insideH", "insideV"):
+        node = OxmlElement(f"w:{name}"); node.set(qn("w:val"), "single"); node.set(qn("w:sz"), "4"); node.set(qn("w:color"), "AAB7C4"); borders.append(node)
+    pr.append(borders)
+
+
+
+def _table_widths(profile, widths):
+    target = round((profile.page_width_cm - 2 * profile.margin_cm) / 2.54 * 1440)
+    scaled = [round(width * target / sum(widths)) for width in widths[:-1]]
+    return tuple((*scaled, target - sum(scaled)))
+
+def _table(doc, headers, rows, widths, numeric=()):
+    table = doc.add_table(rows=1, cols=len(headers))
+    for index, value in enumerate(headers):
+        cell = table.rows[0].cells[index]; cell.text = value; _shading(cell)
+        cell.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
+        for run in cell.paragraphs[0].runs: _font(run.font, 9, True, _DARK)
+    table.rows[0]._tr.get_or_add_trPr().append(OxmlElement("w:tblHeader"))
+    for values in rows:
+        cells = table.add_row().cells
+        for index, value in enumerate(values):
+            cell = cells[index]; cell.text = _display_text(value)
+            cell.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER if index in numeric else WD_ALIGN_PARAGRAPH.LEFT
+            for run in cell.paragraphs[0].runs: _font(run.font, 9.2)
+    _geometry(table, widths)
     return table
 
 
-def _add_picture(document, png, profile, *, max_cm=None):
-    width = _content_width(profile)
-    if max_cm is not None:
-        width = min(width, Cm(max_cm))
-    paragraph = document.add_paragraph()
-    paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    run = paragraph.add_run()
-    run.add_picture(BytesIO(png), width=width)
+def _heading(doc, text, level=1): return doc.add_paragraph(text, style=f"Heading {level}")
+def _label(section): return "Прямое направление" if section.direction == "forward" else "Обратное направление"
+def _route(data):
+    route_name = _display_text(getattr(data, "route_name", ""))
+    endpoints = tuple(_display_text(value) for value in (getattr(data, "start_point", ""), getattr(data, "end_point", "")))
+    return route_name or " - ".join(value for value in endpoints if value) or "________________"
+
+def _num(value):
+    try: return f"{float(value):.3f}" if value not in (None, "") else "—"
+    except (TypeError, ValueError): return "—"
 
 
-# --- Content sections ---------------------------------------------------------
-
-def _direction_length_km(section):
-    total = 0.0
-    for stop in section.stops:
-        distance = stop.get("distance_from_prev_km")
-        if distance is not None:
-            total += float(distance)
-    return total
+def _picture(doc, rendered, width, caption=False):
+    doc.add_picture(BytesIO(rendered.png), width=Cm(width))
+    if caption:
+        text = f"Картографическая основа: {rendered.attribution}" if rendered.basemap_available else "Офлайн-схема: картографическая подложка недоступна"
+        doc.add_paragraph(text, style="Subtitle")
 
 
-def _add_cover(document, data, options, profile):
+
+def _direction_length(section):
+    if section is None or not getattr(section, "stops", ()):
+        return "—"
+
+    try:
+        return f"{sum(float(row.get('distance_from_prev_km') or 0) for row in section.stops):.3f} км"
+    except (TypeError, ValueError):
+        return "—"
+
+
+def _technical_cover(doc, data, options, profile):
+    doc.add_paragraph("ТЕХНИЧЕСКИЙ ПАСПОРТ МАРШРУТА", style="Title")
+    _table(doc, ("Параметр", "Значение"), (
+        ("Номер маршрута", _display_text(getattr(data, "route_number", "")) or "________________"),
+        ("Наименование маршрута", _route(data)),
+        ("Длина прямого направления", _direction_length(data.forward)),
+        ("Длина обратного направления", _direction_length(data.backward)),
+        ("Вид транспорта", "АВТОБУС"),
+        ("Дата состояния", options.effective_date.strftime("%d.%m.%Y")),
+    ), _table_widths(profile, (3600, 6491)))
+
+def _cover(doc, data, options, profile):
     if profile.code == "F":
-        _add_technical_cover(document, data, options, profile)
-    else:
-        _add_department_cover(document, data, options, profile)
+        return _technical_cover(doc, data, options, profile)
+    paragraph = doc.add_paragraph(); paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    paragraph.paragraph_format.space_before, paragraph.paragraph_format.space_after = Pt(54), Pt(34)
+    run = paragraph.add_run("МИНИСТЕРСТВО ТРАНСПОРТА"); _font(run.font, 11, True, _ACCENT)
+    doc.add_paragraph("ПАСПОРТ МАРШРУТА РЕГУЛЯРНОГО СООБЩЕНИЯ", style="Title")
+    paragraph = doc.add_paragraph(); paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    run = paragraph.add_run(f"№ {_display_text(getattr(data, 'route_number', '')) or '________________'}"); _font(run.font, 16, True, _DARK)
+    paragraph = doc.add_paragraph(); paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    run = paragraph.add_run(_route(data)); _font(run.font, 14, True)
+    for text in ("Реестровый номер: ________________________________", "Вид транспорта: АВТОБУС", "Организация перевозчик: ________________________________"):
+        paragraph = doc.add_paragraph(text); paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
 
 
-def _add_department_cover(document, data, options, profile):
-    _add_blank_field(document, "УТВЕРЖДАЮ", lines=2)
-    for _ in range(3):
-        document.add_paragraph()
-    _add_centered(
-        document,
-        "ПАСПОРТ МАРШРУТА РЕГУЛЯРНОГО СООБЩЕНИЯ",
-        bold=True,
-        size=20,
-        color=profile.accent,
-    )
-    _add_centered(
-        document,
-        f"№ {_text(data.route_number)}  «{_text(data.route_name)}»",
-        bold=True,
-        size=16,
-    )
-    _add_centered(
-        document,
-        f"{_text(data.start_point)} — {_text(data.end_point)}",
-        size=13,
-    )
-    document.add_paragraph()
-    if options.season_label:
-        _add_centered(
-            document, options.season_label, size=12, color=profile.accent
-        )
-    _add_centered(
-        document,
-        f"Дата введения: {options.effective_date.strftime('%d.%m.%Y')}",
-        size=11,
-    )
-    _add_centered(document, f"Редакция маршрута: {data.version}", size=11)
-    _add_page_break(document)
+def _approval(doc, data, options, profile):
+    _heading(doc, "УТВЕРЖДЕНИЕ И РЕГИСТРАЦИЯ")
+    for text in ("УТВЕРЖДАЮ: ________________________________", "Должность: ____________________________________________", "Подпись: ____________________   Дата: ________________"):
+        doc.add_paragraph(text)
+    _table(doc, ("Реквизит", "Значение"), (("Номер маршрута", _display_text(getattr(data, "route_number", "")) or "________________"), ("Наименование", _route(data)), ("Дата состояния", options.effective_date.strftime("%d.%m.%Y")), ("Вид транспорта", "АВТОБУС"), ("Вид маршрута", "________________"), ("ОКАТО", "________________")), _table_widths(profile, (3000, 7091)))
+    doc.add_paragraph("Регистрационный номер: ________________________________")
 
 
-def _add_technical_cover(document, data, options, profile):
-    _add_centered(
-        document,
-        "ПАСПОРТ МАРШРУТА РЕГУЛЯРНОГО СООБЩЕНИЯ",
-        bold=True,
-        size=18,
-        color=profile.accent,
-    )
-    document.add_paragraph()
-    rows = (
-        ("Номер маршрута", _text(data.route_number)),
-        ("Наименование", _text(data.route_name)),
-        ("Начальный пункт", _text(data.start_point)),
-        ("Конечный пункт", _text(data.end_point)),
-        ("Длина прямого направления, км", _km(_direction_length_km(data.forward))),
-        ("Длина обратного направления, км", _km(_direction_length_km(data.backward))),
-        ("Вид сообщения", "регулярные перевозки пассажиров"),
-        ("Дата введения", options.effective_date.strftime("%d.%m.%Y")),
-        ("Период действия", options.season_label or "круглогодично"),
-        ("Редакция", str(data.version)),
-    )
-    _add_table(
-        document,
-        ("Показатель", "Значение"),
-        rows,
-        _table_widths(profile, "cover"),
-        profile,
-    )
-    _add_page_break(document)
+def _render_size(profile, kind):
+    if profile.code == "F":
+        return (1600, 400) if kind == "full" else (1600, 700)
+    return (1200, 620) if kind == "full" else (1200, 800)
 
 
-def _add_approval_page(document, data, options, profile):
-    _add_heading(document, "СОГЛАСОВАНИЕ И УТВЕРЖДЕНИЕ", profile)
-    _add_blank_field(document, "Организация-перевозчик")
-    _add_blank_field(document, "Согласовано (ГИБДД)", lines=2)
-    _add_blank_field(document, "Согласовано (орган власти)", lines=2)
-    _add_blank_field(document, "Утвердил (должность, Ф.И.О.)")
-    _add_blank_field(document, "Дата утверждения")
-    _add_page_break(document)
+def _full_scheme(doc, data, profile, directions):
+    _heading(doc, "СХЕМА ДВИЖЕНИЯ МАРШРУТА")
+    for section in directions:
+        _heading(doc, _label(section), 3)
+        _picture(doc, render_route_scheme(section, data.geometries.get(section.direction), size=_render_size(profile, "full")), profile.map_width_cm)
 
 
-def _add_full_scheme(document, data, profile):
-    _add_heading(document, "СХЕМА МАРШРУТА", profile)
-    section = data.forward if data.forward.stops else data.backward
-    geometry = data.geometries.get(section.direction)
-    scheme = render_route_scheme(section, geometry, size=(1400, 900))
-    _add_picture(document, scheme, profile)
-    _add_centered(
-        document,
-        "Схема носит справочный характер; редактируется в текстовом редакторе.",
-        size=8,
-        color="5F6B78",
-    )
-    _add_page_break(document)
+def _direction_scheme(doc, data, profile, section):
+    _heading(doc, f"СХЕМА ДВИЖЕНИЯ - {_label(section).upper()}")
+    _picture(doc, render_route_scheme(section, data.geometries.get(section.direction), size=_render_size(profile, "direction")), profile.map_width_cm)
 
 
-def _add_direction_pages(document, data, direction, profile, *, tile_loader):
-    section = getattr(data, direction)
-    geometry = data.geometries.get(direction)
-    heading, caption = _DIRECTION_LABELS[direction]
-    _add_heading(document, f"СХЕМА {heading} НАПРАВЛЕНИЯ", profile)
-    scheme = render_route_scheme(section, geometry, size=(1400, 900))
-    _add_picture(document, scheme, profile)
-    _add_centered(document, f"Схематическое изображение ({caption})", size=8, color="5F6B78")
-
-    _add_heading(document, f"КАРТА {heading} НАПРАВЛЕНИЯ (OpenStreetMap)", profile)
-    rendered = render_direction_map(
-        section, geometry, size=(1400, 900), tile_loader=tile_loader
-    ) if tile_loader is not None else render_direction_map(
-        section, geometry, size=(1400, 900)
-    )
-    _add_picture(document, rendered.png, profile)
-    _add_centered(document, rendered.attribution, size=8, color="5F6B78")
-    _add_page_break(document)
+def _direction_map(doc, data, profile, section, tile_loader):
+    _heading(doc, f"КАРТА МАРШРУТА - {_label(section).upper()}")
+    _picture(doc, render_direction_map(section, data.geometries.get(section.direction), size=_render_size(profile, "direction"), tile_loader=tile_loader), profile.map_width_cm, True)
 
 
-def _cumulative_rows(section):
-    cumulative = 0.0
-    rows = []
-    for number, stop in enumerate(section.stops, 1):
-        distance = stop.get("distance_from_prev_km")
-        if distance is not None:
-            cumulative += float(distance)
-        rows.append((number, stop, cumulative))
-    return rows
+def _compact(doc, directions, profile):
+    _heading(doc, "ОСТАНОВОЧНЫЕ ПУНКТЫ И РАССТОЯНИЯ")
+    for section in directions:
+        _heading(doc, _label(section), 2)
+        _table(doc, ("№", "Код", "Остановочный пункт", "От предыдущего, км", "Нарастающим, км"), ((number, row.get("external_code") or "—", row.get("name") or "—", _num(row.get("distance_from_prev_km")), _num(row.get("cumulative_km"))) for number, row in enumerate(section.stops, 1)), _table_widths(profile, (500, 1300, 3691, 2300, 2300)), (0, 3, 4))
 
 
-def _add_distance_tables(document, data, profile):
-    _add_heading(document, "ТАБЛИЦА РАССТОЯНИЙ", profile)
-    for direction in ("forward", "backward"):
-        section = getattr(data, direction)
-        if not section.stops:
-            continue
-        heading, _ = _DIRECTION_LABELS[direction]
-        _add_centered(
-            document, f"{heading} направление", bold=True, size=11,
-            color=profile.accent,
-        )
-        rows = [
-            (
-                number,
-                _text(stop.get("name")),
-                _km(stop.get("distance_from_prev_km")),
-                _km(cumulative),
-            )
-            for number, stop, cumulative in _cumulative_rows(section)
-        ]
-        _add_table(
-            document,
-            ("№", "Остановочный пункт", "Расст. от пред., км", "Нарастающим, км"),
-            rows,
-            _table_widths(profile, "distance"),
-            profile,
-        )
-    _add_page_break(document)
+def _detailed(doc, section, profile):
+    _heading(doc, f"ПОДРОБНЫЕ ОСТАНОВОЧНЫЕ ПУНКТЫ - {_label(section).upper()}")
+    _table(doc, ("№", "Код", "Расст. от пред., км", "Нарастающим, км", "Остановка", "Адрес", "Широта", "Долгота", "Муниципалитет / ОКАТО"), ((number, row.get("external_code") or "—", _num(row.get("distance_from_prev_km")), _num(row.get("cumulative_km")), row.get("name") or "—", row.get("address") or "—", _num(row.get("latitude")), _num(row.get("longitude")), row.get("municipality") or row.get("okato") or "________________") for number, row in enumerate(section.stops, 1)), _table_widths(profile, (400, 800, 1150, 1050, 1650, 1650, 1050, 1050, 1291)), (0, 2, 3, 6, 7))
 
 
-def _add_coordinate_tables(document, data, profile):
-    _add_heading(document, "КООРДИНАТЫ ОСТАНОВОЧНЫХ ПУНКТОВ", profile)
-    for direction in ("forward", "backward"):
-        section = getattr(data, direction)
-        if not section.stops:
-            continue
-        heading, _ = _DIRECTION_LABELS[direction]
-        _add_centered(
-            document, f"{heading} направление", bold=True, size=11,
-            color=profile.accent,
-        )
-        rows = [
-            (
-                number,
-                _text(stop.get("external_code")),
-                _km(stop.get("distance_from_prev_km")),
-                _km(cumulative),
-                _text(stop.get("name")),
-                _text(stop.get("address")),
-                _coord(stop.get("latitude")),
-                _coord(stop.get("longitude")),
-                "",
-            )
-            for number, stop, cumulative in _cumulative_rows(section)
-        ]
-        _add_table(
-            document,
-            (
-                "№", "Код", "Расст., км", "Нараст., км", "Остановка",
-                "Адрес", "Широта", "Долгота", "МО / ОКАТО",
-            ),
-            rows,
-            _table_widths(profile, "coordinates"),
-            profile,
-        )
-    _add_page_break(document)
+def _roads(doc):
+    _heading(doc, "ХАРАКТЕРИСТИКА АВТОМОБИЛЬНЫХ ДОРОГ")
+    for text in ("Улицы (дороги), категория: _____________________________________________", "Ширина проезжей части, покрытие: ______________________________________", "Пересечения, мосты, железнодорожные переезды: _________________________", "Опасные участки и меры безопасности: __________________________________", "Примечания: ___________________________________________________________"):
+        doc.add_paragraph(text)
 
 
-def _add_road_characteristics(document, profile):
-    _add_heading(document, "ХАРАКТЕРИСТИКА ДОРОГИ", profile)
-    rows = [
-        (name, "", "", "")
-        for name in (
-            "Тип покрытия",
-            "Ширина проезжей части",
-            "Наличие тротуаров",
-            "Искусственные сооружения",
-            "Опасные участки",
-            "Освещение",
-        )
-    ]
-    _add_table(
-        document,
-        ("Участок / показатель", "Протяжённость", "Состояние", "Примечание"),
-        rows,
-        _table_widths(profile, "road"),
-        profile,
-    )
-    _add_blank_field(document, "Дополнительные сведения о дороге", lines=2)
-
-
-def _table_widths(profile, table_kind):
-    widths = {
-        ("D", "cover"): (7.0, 10.8),
-        ("F", "cover"): (9.0, 17.9),
-        ("D", "distance"): (1.2, 9.4, 3.6, 3.6),
-        ("F", "distance"): (1.4, 14.6, 5.4, 5.5),
-        ("D", "coordinates"): (
-            0.9, 1.8, 1.9, 1.9, 3.4, 3.4, 1.9, 1.9, 0.7,
-        ),
-        ("F", "coordinates"): (
-            1.1, 2.4, 2.4, 2.4, 5.0, 5.0, 2.7, 2.7, 3.2,
-        ),
-        ("D", "road"): (7.0, 3.6, 3.6, 3.6),
-        ("F", "road"): (11.9, 5.0, 5.0, 5.0),
-    }
-    return widths[(profile.code, table_kind)]
-
-
-# --- Orchestration ------------------------------------------------------------
-
-def build_route_passport(data, options, *, style, tile_loader=None):
-    normalized = str(style).upper()
-    if normalized not in PROFILES:
-        raise ValueError("Оформление паспорта должно быть D или F")
-    if not data.forward.stops and not data.backward.stops:
-        raise ValueError(
-            "Для паспорта маршрута необходимо добавить остановки"
-        )
-    profile = PROFILES[normalized]
-    document = Document()
-    _configure_styles(document, profile)
-    _configure_section(document.sections[0], profile)
-    _add_page_number(document.sections[0], profile)
-    _add_cover(document, data, options, profile)
-    _add_approval_page(document, data, options, profile)
-    _add_full_scheme(document, data, profile)
-    for direction in ("forward", "backward"):
-        if getattr(data, direction).stops:
-            _add_direction_pages(
-                document, data, direction, profile, tile_loader=tile_loader
-            )
-    _add_distance_tables(document, data, profile)
-    _add_coordinate_tables(document, data, profile)
-    _add_road_characteristics(document, profile)
-    output = BytesIO()
-    document.save(output)
-    return output.getvalue()
+def build_route_passport(data, options, *, style, tile_loader=None) -> bytes:
+    """Build the approved D profile; depot legs are intentionally excluded."""
+    profile = _profile(style)
+    directions = tuple(item for item in (getattr(data, "forward", None), getattr(data, "backward", None)) if item is not None and getattr(item, "stops", ()))
+    if not directions: raise ValueError("Для паспорта маршрута необходимо добавить остановки")
+    doc = Document(); section = doc.sections[0]
+    _section(section, profile); _styles(doc, profile); _furniture(section, getattr(data, "route_number", "")); _cover(doc, data, options, profile)
+    doc.add_page_break(); _approval(doc, data, options, profile)
+    doc.add_page_break(); _full_scheme(doc, data, profile, directions)
+    for item in directions:
+        doc.add_page_break(); _direction_scheme(doc, data, profile, item)
+        doc.add_page_break(); _direction_map(doc, data, profile, item, tile_loader)
+    doc.add_page_break(); _compact(doc, directions, profile)
+    for item in directions: doc.add_page_break(); _detailed(doc, item, profile)
+    doc.add_page_break(); _roads(doc)
+    output = BytesIO(); doc.save(output); return output.getvalue()
