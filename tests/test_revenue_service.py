@@ -169,3 +169,78 @@ def test_set_lines_rejects_negative_and_missing_tariff(tmp_path):
             rs.set_sheet_lines(con, sheet_id, [(no_tariff, 5)])
     finally:
         con.close()
+
+
+def _draft_with_lines(con):
+    wid, _ = _seed_waybill(con, date="2026-08-07")
+    single = _fare(con, "single", 30.0)
+    sheet_id = rs.create_sheet_from_waybill(con, wid, created_by="admin")
+    rs.set_sheet_lines(con, sheet_id, [(single, 100)])  # expected 3000
+    return sheet_id
+
+
+def test_submit_computes_difference_and_advances_status(tmp_path):
+    con = _open_db(tmp_path)
+    try:
+        sheet_id = _draft_with_lines(con)
+        sheet = rs.submit_sheet(con, sheet_id, 2950.0, user="cashier")
+        con.commit()
+        assert sheet["status"] == "сдан"
+        assert sheet["submitted_amount"] == 2950.0
+        assert sheet["difference"] == -50.0
+    finally:
+        con.close()
+
+
+def test_reconcile_requires_submitted(tmp_path):
+    con = _open_db(tmp_path)
+    try:
+        sheet_id = _draft_with_lines(con)
+        with pytest.raises(rs.RevenueError):
+            rs.reconcile_sheet(con, sheet_id, user="buh")
+        rs.submit_sheet(con, sheet_id, 3000.0, user="cashier")
+        sheet = rs.reconcile_sheet(con, sheet_id, user="buh")
+        con.commit()
+        assert sheet["status"] == "сверен"
+    finally:
+        con.close()
+
+
+def test_cancel_sets_status_and_reason(tmp_path):
+    con = _open_db(tmp_path)
+    try:
+        sheet_id = _draft_with_lines(con)
+        sheet = rs.cancel_sheet(con, sheet_id, "ошибка", user="admin")
+        con.commit()
+        assert sheet["status"] == "аннулирован"
+        assert sheet["cancel_reason"] == "ошибка"
+    finally:
+        con.close()
+
+
+def test_lines_locked_after_submit(tmp_path):
+    con = _open_db(tmp_path)
+    try:
+        sheet_id = _draft_with_lines(con)
+        single = con.execute(
+            "SELECT fare_type_id FROM revenue_lines WHERE sheet_id=?", (sheet_id,)
+        ).fetchone()["fare_type_id"]
+        rs.submit_sheet(con, sheet_id, 3000.0, user="cashier")
+        with pytest.raises(rs.RevenueError):
+            rs.set_sheet_lines(con, sheet_id, [(single, 50)])
+    finally:
+        con.close()
+
+
+def test_cancel_frees_waybill_for_new_sheet(tmp_path):
+    con = _open_db(tmp_path)
+    try:
+        wid, _ = _seed_waybill(con)
+        first = rs.create_sheet_from_waybill(con, wid, created_by="admin")
+        rs.cancel_sheet(con, first, "ошибка", user="admin")
+        con.commit()
+        second = rs.create_sheet_from_waybill(con, wid, created_by="admin")
+        con.commit()
+        assert second != first
+    finally:
+        con.close()

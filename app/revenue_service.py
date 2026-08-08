@@ -179,3 +179,72 @@ def set_sheet_lines(con, sheet_id, lines):
         (expected, sheet_id),
     )
     return get_sheet(con, sheet_id)
+
+
+def _require_status(con, sheet_id, expected_statuses):
+    row = con.execute(
+        "SELECT id, status FROM revenue_sheets WHERE id=?", (sheet_id,)
+    ).fetchone()
+    if row is None:
+        raise RevenueError("Лист выручки не найден")
+    if row["status"] not in expected_statuses:
+        raise RevenueError(f"Недопустимый статус листа: {row['status']}")
+    return row
+
+
+def submit_sheet(con, sheet_id, submitted_amount, *, user):
+    _require_status(con, sheet_id, {"черновик"})
+    if (
+        isinstance(submitted_amount, bool)
+        or not isinstance(submitted_amount, (int, float))
+        or submitted_amount < 0
+    ):
+        raise RevenueError("Сумма сдачи должна быть неотрицательным числом")
+    expected = con.execute(
+        "SELECT expected_amount FROM revenue_sheets WHERE id=?", (sheet_id,)
+    ).fetchone()["expected_amount"]
+    difference = round(float(submitted_amount) - float(expected), 2)
+    con.execute(
+        "UPDATE revenue_sheets SET submitted_amount=?, difference=?, status='сдан', "
+        "submitted_at=? WHERE id=?",
+        (float(submitted_amount), difference, _now(), sheet_id),
+    )
+    return get_sheet(con, sheet_id)
+
+
+def reconcile_sheet(con, sheet_id, *, user):
+    _require_status(con, sheet_id, {"сдан"})
+    con.execute(
+        "UPDATE revenue_sheets SET status='сверен', reconciled_by=?, reconciled_at=? WHERE id=?",
+        (user, _now(), sheet_id),
+    )
+    return get_sheet(con, sheet_id)
+
+
+def cancel_sheet(con, sheet_id, reason, *, user):
+    _require_status(con, sheet_id, {"черновик", "сдан", "сверен"})
+    if not str(reason or "").strip():
+        raise RevenueError("Укажите причину аннулирования")
+    con.execute(
+        "UPDATE revenue_sheets SET status='аннулирован', cancel_reason=? WHERE id=?",
+        (reason.strip(), sheet_id),
+    )
+    return get_sheet(con, sheet_id)
+
+
+def list_sheets(con, *, date_from=None, date_to=None, route_id=None, status=None):
+    clauses = []
+    params = []
+    if date_from:
+        clauses.append("date>=?"); params.append(date_from)
+    if date_to:
+        clauses.append("date<=?"); params.append(date_to)
+    if route_id:
+        clauses.append("route_id=?"); params.append(route_id)
+    if status:
+        clauses.append("status=?"); params.append(status)
+    sql = "SELECT * FROM revenue_sheets"
+    if clauses:
+        sql += " WHERE " + " AND ".join(clauses)
+    sql += " ORDER BY date DESC, number DESC"
+    return [dict(r) for r in con.execute(sql, params)]
