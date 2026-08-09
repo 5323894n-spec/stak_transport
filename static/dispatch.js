@@ -80,7 +80,8 @@ if (typeof VIEWS !== "undefined") {
       <div class="card"><div class="num">${s.release_regularity}%</div><div class="lbl">регулярность выпуска</div></div></div>`;
 
     if (!board.has_order) {
-      return `<div class="dispatch-tab">${toolbar}<p class="muted">На эту дату нет утверждённого наряда. Сформируйте и утвердите наряд на день.</p></div>`;
+      $("content").innerHTML = `<div class="dispatch-tab">${toolbar}<p class="muted">На эту дату нет утверждённого наряда. Сформируйте и утвердите наряд на день.</p></div>`;
+      return;
     }
 
     if (st.tab === "adherence") {
@@ -91,10 +92,11 @@ if (typeof VIEWS !== "undefined") {
         <td><input id="disp-trip-${line}-${f.trip_number}" type="time" value="${esc(f.actual_dep || "")}"><button class="btn small" onclick="dispatchSaveTrip(${line},${f.trip_number})">✓</button></td>
         <td class="num ${dispatchOnTime(f.deviation_min) ? "" : "revenue-shortage"}">${dispatchDeviationLabel(f.deviation_min)}</td>
         <td>${f.on_time == null ? "" : (f.on_time ? "вовремя" : "с отклонением")}</td></tr>`).join("");
-      return `<div class="dispatch-tab">${toolbar}${summary}
+      $("content").innerHTML = `<div class="dispatch-tab">${toolbar}${summary}
         <label>Выход <select onchange="dispatchSelectOutput(+this.value)">${options}</select></label>
         <p class="muted">Регулярность рейсов: ${s.trip_regularity != null ? s.trip_regularity + "%" : "—"}</p>
         <table class="dispatch-board"><thead><tr><th>Рейс</th><th>План</th><th>Факт</th><th>Откл.</th><th>Оценка</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+      return;
     }
 
     const rows = board.rows.map(r => {
@@ -111,7 +113,7 @@ if (typeof VIEWS !== "undefined") {
         <td><span class="dispatch-status dispatch-status-${esc(r.status)}">${esc(r.status)}</span>${r.reason ? ' · ' + esc(r.reason) : ''}</td>
         <td class="dispatch-actions">${actions}</td></tr>`;
     }).join("");
-    return `<div class="dispatch-tab">${toolbar}${summary}
+    $("content").innerHTML = `<div class="dispatch-tab">${toolbar}${summary}
       ${gps ? '<p class="muted">Режим GPS: статусы поступают по телеметрии. Кнопка «Смоделировать выпуск» имитирует событие.</p>' : ''}
       <table class="dispatch-board"><thead><tr><th>Маршрут</th><th>Выход</th><th>Водитель</th><th>Автобус</th><th>План</th><th>Факт</th><th>Откл.</th><th>Статус</th><th>Действия</th></tr></thead>
       <tbody>${rows}</tbody></table></div>`;

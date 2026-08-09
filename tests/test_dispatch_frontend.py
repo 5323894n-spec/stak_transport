@@ -22,7 +22,7 @@ def test_dispatch_nav_and_view():
 
 def test_index_loads_dispatch_script():
     index = _src("index.html")
-    assert "/static/dispatch.js?v=1.0" in index
+    assert "/static/dispatch.js?v=1.1" in index
     assert "app.js?v=3.4" in index
 
 

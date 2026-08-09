@@ -20,7 +20,7 @@ def test_nav_and_view_registered():
 
 def test_index_loads_revenue_script():
     index = _src("index.html")
-    assert "/static/revenue.js?v=1.0" in index
+    assert "/static/revenue.js?v=1.1" in index
 
 
 def test_styles_have_revenue_rules():

@@ -37,10 +37,11 @@ if (typeof VIEWS !== "undefined") {
           .join("<br>") || "<span class=\"muted\">нет тарифа</span>";
         return `<tr><td>${esc(t.name)}</td><td>${esc(t.unit)}</td><td>${versions}</td></tr>`;
       }).join("");
-      return `<div class="revenue-tab">${toolbar}
+      $("content").innerHTML = `<div class="revenue-tab">${toolbar}
         <h3>Виды билетов и тарифы</h3>
         <table><thead><tr><th>Вид билета</th><th>Единица</th><th>Тарифы (версии)</th></tr></thead>
         <tbody>${rows}</tbody></table></div>`;
+      return;
     }
 
     const data = await api("/api/revenue/sheets");
@@ -52,7 +53,7 @@ if (typeof VIEWS !== "undefined") {
       `<td>${revenueStatusBadge(s.status)}</td></tr>`,
     ).join("");
     const empty = data.items.length ? "" : `<p class="muted">Листы выручки ещё не заведены. Лист создаётся из путевого листа.</p>`;
-    return `<div class="revenue-tab">${toolbar}
+    $("content").innerHTML = `<div class="revenue-tab">${toolbar}
       <h3>Листы выручки</h3>${empty}
       <table><thead><tr><th>№</th><th>Дата</th><th>Ожидаемо, ₽</th><th>Сдано, ₽</th><th>Разница, ₽</th><th>Статус</th></tr></thead>
       <tbody>${rows}</tbody></table></div>`;
