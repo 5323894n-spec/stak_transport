@@ -72,7 +72,8 @@ def set_source_mode(con, date, mode, *, user):
 
 def _approved_order(con, date):
     return con.execute(
-        "SELECT * FROM orders WHERE date=? AND status='утверждён'", (date,)
+        "SELECT * FROM orders WHERE date=? AND status IN ('утвержден','выдан','выполнен')",
+        (date,),
     ).fetchone()
 
 

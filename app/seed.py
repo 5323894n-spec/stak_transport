@@ -193,6 +193,31 @@ def run():
             rc.commit()
     finally:
         rc.close()
+
+    from . import dispatch_service as _ds
+    dc = db.connect()
+    try:
+        if dc.execute("SELECT 1 FROM dispatch_outputs LIMIT 1").fetchone() is None:
+            iso = today.isoformat()
+            rows = _ds.build_board(dc, iso).get("rows", [])
+            for index, row in enumerate(rows):
+                if index % 4 == 3:
+                    _ds.set_output_status(dc, row["output_id"], "срыв",
+                                          reason="техническая неисправность", user="admin")
+                elif index % 3 == 0:
+                    _ds.set_output_status(dc, row["output_id"], "выпущен",
+                                          at=row["plan_release"], user="admin")
+                elif index % 3 == 1:
+                    _ds.set_output_status(dc, row["output_id"], "на_линии", user="admin")
+            if rows:
+                first = rows[0]["order_line_id"]
+                for fact in _ds.list_trip_facts(dc, iso, first)[:2]:
+                    _ds.set_trip_fact(dc, first, fact["trip_number"], fact["plan_dep"],
+                                      date=iso, user="admin")
+            dc.commit()
+    finally:
+        dc.close()
+
     con.close()
     print("Демо-данные загружены: маршрутов 6, автобусов 20, водителей 30.")
     print("Пользователи: admin/admin, dispatcher/12345, ekspl/12345, kadry/12345, buh/12345, mech/12345, med/12345, fuel/12345, dir/12345")

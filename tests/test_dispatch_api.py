@@ -11,7 +11,7 @@ def _prepared(tmp_path, date="2026-08-09"):
         d = con.execute("INSERT INTO drivers(tab_number,fio) VALUES(?,?)", ("Т1", "Иванов")).lastrowid
         b = con.execute("INSERT INTO buses(garage_number,plate) VALUES(?,?)", ("Г1", "A1")).lastrowid
         r = con.execute("INSERT INTO routes(number,name) VALUES(?,?)", ("7", "Центр")).lastrowid
-        oid = con.execute("INSERT INTO orders(date,status) VALUES(?, 'утверждён')", (date,)).lastrowid
+        oid = con.execute("INSERT INTO orders(date,status) VALUES(?, 'утвержден')", (date,)).lastrowid
         line = con.execute(
             "INSERT INTO order_lines(order_id,route_id,output_number,shift_number,driver_id,bus_id,depart_depot,start_line) "
             "VALUES(?,?,?,?,?,?,?,?)", (oid, r, 1, 1, d, b, "05:50", "06:00")).lastrowid
