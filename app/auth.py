@@ -10,8 +10,8 @@ ROLES = ["админ", "диспетчер", "эксплуатация", "кад
 
 # право на запись по разделам (упрощённая матрица; админ может всё)
 WRITE_ACCESS = {
-    "диспетчер": {"orders", "waybills", "roster", "summary", "revenue"},
-    "эксплуатация": {"routes", "trips", "roster", "orders", "summary"},
+    "диспетчер": {"orders", "waybills", "roster", "summary", "revenue", "dispatch"},
+    "эксплуатация": {"routes", "trips", "roster", "orders", "summary", "dispatch"},
     "кадры": {"drivers", "absences", "roster"},
     "бухгалтер": {"export1c", "timesheet", "revenue"},
     "механик": {"tech", "buses"},

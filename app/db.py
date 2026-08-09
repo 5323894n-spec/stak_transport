@@ -251,6 +251,21 @@ CREATE TABLE IF NOT EXISTS revenue_lines(
   unit_price REAL NOT NULL, amount REAL NOT NULL,
   UNIQUE(sheet_id, fare_type_id),
   FOREIGN KEY(sheet_id) REFERENCES revenue_sheets(id) ON DELETE CASCADE);
+
+CREATE TABLE IF NOT EXISTS dispatch_days(
+  id INTEGER PRIMARY KEY, date TEXT UNIQUE NOT NULL,
+  source_mode TEXT DEFAULT 'manual', created_by TEXT, created_at TEXT);
+
+CREATE TABLE IF NOT EXISTS dispatch_outputs(
+  id INTEGER PRIMARY KEY, date TEXT NOT NULL, order_line_id INTEGER NOT NULL UNIQUE,
+  plan_release TEXT, actual_release TEXT, deviation_min INTEGER,
+  status TEXT DEFAULT 'план', reason TEXT, note TEXT, updated_by TEXT, updated_at TEXT);
+
+CREATE TABLE IF NOT EXISTS dispatch_trip_facts(
+  id INTEGER PRIMARY KEY, date TEXT NOT NULL, order_line_id INTEGER NOT NULL,
+  trip_number INTEGER NOT NULL, plan_dep TEXT, actual_dep TEXT,
+  deviation_min INTEGER, on_time INTEGER, updated_by TEXT, updated_at TEXT,
+  UNIQUE(order_line_id, trip_number));
 """
 
 DEFAULT_NORMS = {
@@ -325,6 +340,7 @@ ORG_DEFAULTS = {
     "waybill_issue_mode": "strict_med_tech",
     "session_timeout_min": "120",
     "repair_repeat_days": "30",
+    "dispatch_tolerance_min": "2",
 }
 
 MIGRATIONS = [
@@ -355,6 +371,8 @@ def init_db():
     con.execute("CREATE INDEX IF NOT EXISTS idx_revenue_sheets_waybill ON revenue_sheets(waybill_id)")
     con.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_revenue_sheet_active ON revenue_sheets(waybill_id) WHERE status<>'аннулирован'")
     con.execute("CREATE INDEX IF NOT EXISTS idx_fare_tariffs_type_from ON fare_tariffs(fare_type_id, valid_from)")
+    con.execute("CREATE INDEX IF NOT EXISTS idx_dispatch_outputs_date ON dispatch_outputs(date)")
+    con.execute("CREATE INDEX IF NOT EXISTS idx_dispatch_trip_facts_line ON dispatch_trip_facts(order_line_id)")
     migrate_repairs(con)
     if not con.execute("SELECT 1 FROM norms").fetchone():
         con.execute(
