@@ -151,6 +151,59 @@ def _serialized_time_row(row):
     }
 
 
+def _even_distribution(trace, trip, departure_sec):
+    """Spread the trip's dep→arr span evenly across stops when leg run times are
+    not defined, so the per-stop schedule still renders."""
+    arrival_sec = service_time_to_seconds(trip.get("arr_time"))
+    span = (
+        arrival_sec - departure_sec
+        if arrival_sec is not None and arrival_sec > departure_sec
+        else 0
+    )
+    last = len(trace) - 1
+    rows = []
+    for index, stop in enumerate(trace):
+        offset = round(span * index / last) if last > 0 and span else 0
+        moment = departure_sec + offset
+        rows.append({
+            "route_stop_id": stop["id"],
+            "sequence": int(stop["sequence"]),
+            "arrival_sec": moment,
+            "departure_sec": moment,
+            "is_timing_point": 1 if stop.get("is_timing_point") else 0,
+        })
+    return rows
+
+
+def _display_stop_times(con, trip, trace):
+    """Return per-stop times for the matrix: stored rows (preserving manual
+    edits) when present, otherwise computed on the fly so the schedule shows."""
+    stored = db.rows(
+        con.execute(
+            "SELECT * FROM trip_stop_times WHERE trip_id=? ORDER BY sequence,id",
+            (trip["id"],),
+        )
+    )
+    if stored:
+        return [_serialized_time_row(row) for row in stored]
+    if not trace:
+        return []
+    departure_sec = service_time_to_seconds(trip.get("dep_time"))
+    if departure_sec is None:
+        return []
+    period = _period_for_trip(con, trip, departure_sec)
+    try:
+        rows = calculate_trip_stop_times(
+            trace,
+            departure_sec=departure_sec,
+            runtime_factor=(period or {}).get("travel_time_factor", 1),
+            runtime_overrides=_runtime_overrides(con, (period or {}).get("id")),
+        )
+    except ValueError:
+        rows = _even_distribution(trace, trip, departure_sec)
+    return [_serialized_time_row({**row, "is_manual_override": 0}) for row in rows]
+
+
 def _trip_time_rows(con, trip_id):
     return db.rows(con.execute(
         "SELECT * FROM trip_stop_times WHERE trip_id=? ORDER BY sequence,id",
@@ -313,13 +366,7 @@ def stop_time_matrix(
         query += " ORDER BY output_number,dep_time,trip_number,id"
         trips = []
         for trip in db.rows(con.execute(query, args)):
-            times = db.rows(
-                con.execute(
-                    "SELECT * FROM trip_stop_times WHERE trip_id=? "
-                    "ORDER BY sequence,id",
-                    (trip["id"],),
-                )
-            )
+            trace = stops.get(DIRECTION_TO_TRACE.get(trip["direction"], ""), [])
             trips.append(
                 {
                     "trip_id": trip["id"],
@@ -330,7 +377,7 @@ def stop_time_matrix(
                     "period_id": trip.get("period_id"),
                     "dep_time": trip["dep_time"],
                     "arr_time": trip["arr_time"],
-                    "times": [_serialized_time_row(row) for row in times],
+                    "times": _display_stop_times(con, trip, trace),
                 }
             )
         return {"stops": stops, "trips": trips}
