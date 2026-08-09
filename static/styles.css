@@ -382,3 +382,20 @@ label.f > * { display: block; width: 100%; margin-top: 3px; color: var(--text); 
 /* Паспорт маршрута: действия и примечание */
 .route-passport-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 6px; }
 .route-comment { width: 100%; box-sizing: border-box; resize: vertical; font: inherit; padding: 6px 8px; }
+
+/* Диспетчер: табло и статусы */
+.dispatch-tab { padding: 8px 0; }
+.dispatch-toolbar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.dispatch-summary { margin: 8px 0; }
+.dispatch-board { width: 100%; border-collapse: collapse; margin-top: 8px; }
+.dispatch-board th, .dispatch-board td { border: 1px solid #d8dee6; padding: 4px 8px; text-align: left; }
+.dispatch-board td.num { text-align: right; font-variant-numeric: tabular-nums; }
+.dispatch-actions { display: flex; gap: 4px; flex-wrap: wrap; }
+.dispatch-status { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 12px; background: #eef2f7; }
+.dispatch-status-выпущен { background: #e3f0ff; }
+.dispatch-status-на_линии { background: #eaf4ea; }
+.dispatch-status-сошёл { background: #fff4d6; }
+.dispatch-status-срыв { background: #fdecec; color: #8a1f1f; }
+.dispatch-status-замена { background: #f0e8fb; }
+@media (max-width: 760px) { .dispatch-board { font-size: 13px; } }
+@media print { .dispatch-toolbar, .dispatch-actions { display: none; } }
