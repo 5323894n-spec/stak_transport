@@ -26,3 +26,72 @@ def test_dispatch_tables_and_permission_and_setting(tmp_path):
     from app.auth import WRITE_ACCESS
     assert "dispatch" in WRITE_ACCESS["диспетчер"]
     assert "dispatch" in WRITE_ACCESS["эксплуатация"]
+
+
+from app import dispatch_service as ds
+
+
+def _seed_order(con, date="2026-08-09"):
+    d = con.execute("INSERT INTO drivers(tab_number,fio) VALUES(?,?)", ("Т1", "Иванов")).lastrowid
+    b = con.execute("INSERT INTO buses(garage_number,plate) VALUES(?,?)", ("Г1", "A1")).lastrowid
+    r = con.execute("INSERT INTO routes(number,name) VALUES(?,?)", ("7", "Центр")).lastrowid
+    oid = con.execute("INSERT INTO orders(date,status) VALUES(?, 'утверждён')", (date,)).lastrowid
+    line = con.execute(
+        "INSERT INTO order_lines(order_id,route_id,output_number,shift_number,driver_id,bus_id,depart_depot,start_line) "
+        "VALUES(?,?,?,?,?,?,?,?)", (oid, r, 1, 1, d, b, "05:50", "06:00")).lastrowid
+    con.commit()
+    return date, line, r, b
+
+
+def test_build_board_from_approved_order(tmp_path):
+    con = _open_db(tmp_path)
+    try:
+        date, line, *_ = _seed_order(con)
+        board = ds.build_board(con, date)
+        con.commit()
+        assert board["has_order"] and board["order_approved"]
+        assert board["source_mode"] == "manual"
+        row = board["rows"][0]
+        assert row["order_line_id"] == line
+        assert row["plan_release"] == "05:50"
+        assert row["status"] == "план"
+    finally:
+        con.close()
+
+
+def test_release_sets_deviation_and_status(tmp_path):
+    con = _open_db(tmp_path)
+    try:
+        date, line, *_ = _seed_order(con)
+        board = ds.build_board(con, date)
+        output_id = board["rows"][0]["output_id"]
+        updated = ds.set_output_status(con, output_id, "выпущен", at="05:54", user="disp")
+        con.commit()
+        assert updated["status"] == "выпущен"
+        assert updated["actual_release"] == "05:54"
+        assert updated["deviation_min"] == 4
+    finally:
+        con.close()
+
+
+def test_disruption_requires_reason(tmp_path):
+    con = _open_db(tmp_path)
+    try:
+        date, line, *_ = _seed_order(con)
+        output_id = ds.build_board(con, date)["rows"][0]["output_id"]
+        with pytest.raises(ds.DispatchError):
+            ds.set_output_status(con, output_id, "срыв", user="disp")
+        ok = ds.set_output_status(con, output_id, "срыв", reason="ДТП", user="disp")
+        con.commit()
+        assert ok["status"] == "срыв" and ok["reason"] == "ДТП"
+    finally:
+        con.close()
+
+
+def test_empty_board_without_approved_order(tmp_path):
+    con = _open_db(tmp_path)
+    try:
+        board = ds.build_board(con, "2026-08-09")
+        assert board["has_order"] is False and board["rows"] == []
+    finally:
+        con.close()
