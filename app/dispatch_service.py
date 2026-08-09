@@ -152,6 +152,78 @@ def set_output_status(con, output_id, status, *, at=None, reason=None, note=None
     ).fetchone())
 
 
+def list_trip_facts(con, date, order_line_id):
+    line = con.execute(
+        "SELECT route_id, output_number, shift_number FROM order_lines WHERE id=?",
+        (order_line_id,),
+    ).fetchone()
+    if line is None:
+        raise DispatchError("Выход наряда не найден")
+    day_type = sched_day_type(con, date)
+    trips = con.execute(
+        "SELECT trip_number, MIN(dep_time) AS dep FROM route_trips "
+        "WHERE route_id=? AND day_type=? AND output_number=? "
+        "AND (shift_number=? OR shift_number IS NULL) AND trip_number IS NOT NULL "
+        "GROUP BY trip_number ORDER BY trip_number",
+        (line["route_id"], day_type, line["output_number"], line["shift_number"]),
+    ).fetchall()
+    facts = {
+        r["trip_number"]: dict(r)
+        for r in con.execute(
+            "SELECT trip_number, actual_dep, deviation_min, on_time "
+            "FROM dispatch_trip_facts WHERE order_line_id=?",
+            (order_line_id,),
+        )
+    }
+    result = []
+    for trip in trips:
+        fact = facts.get(trip["trip_number"], {})
+        result.append({
+            "trip_number": trip["trip_number"], "plan_dep": trip["dep"],
+            "actual_dep": fact.get("actual_dep"),
+            "deviation_min": fact.get("deviation_min"), "on_time": fact.get("on_time"),
+        })
+    return result
+
+
+def set_trip_fact(con, order_line_id, trip_number, actual_dep, *, date, user):
+    plan = next(
+        (f["plan_dep"] for f in list_trip_facts(con, date, order_line_id)
+         if f["trip_number"] == trip_number),
+        None,
+    )
+    if plan is None:
+        raise DispatchError("Рейс не найден в плане выхода")
+    deviation = _deviation(plan, actual_dep)
+    on_time = 1 if deviation is not None and abs(deviation) <= _tolerance(con) else 0
+    con.execute(
+        "INSERT INTO dispatch_trip_facts(date, order_line_id, trip_number, plan_dep, actual_dep, "
+        "deviation_min, on_time, updated_by, updated_at) VALUES(?,?,?,?,?,?,?,?,?) "
+        "ON CONFLICT(order_line_id, trip_number) DO UPDATE SET actual_dep=excluded.actual_dep, "
+        "plan_dep=excluded.plan_dep, deviation_min=excluded.deviation_min, on_time=excluded.on_time, "
+        "updated_by=excluded.updated_by, updated_at=excluded.updated_at",
+        (date, order_line_id, trip_number, plan, actual_dep, deviation, on_time, user, _now()),
+    )
+    return {
+        "trip_number": trip_number, "plan_dep": plan, "actual_dep": actual_dep,
+        "deviation_min": deviation, "on_time": on_time,
+    }
+
+
+def day_summary(con, date):
+    board = build_board(con, date)
+    summary = dict(board["summary"])
+    facts = con.execute(
+        "SELECT on_time FROM dispatch_trip_facts WHERE date=? AND actual_dep IS NOT NULL",
+        (date,),
+    ).fetchall()
+    total = len(facts)
+    on_time = sum(1 for f in facts if f["on_time"] == 1)
+    summary["trip_regularity"] = round(100 * on_time / total, 1) if total else 0.0
+    summary["trips_recorded"] = total
+    return summary
+
+
 def day_summary_counts(rows, tolerance=2):
     summary = {"planned": len(rows)}
     for key, status in (

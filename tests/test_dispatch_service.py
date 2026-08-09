@@ -29,6 +29,7 @@ def test_dispatch_tables_and_permission_and_setting(tmp_path):
 
 
 from app import dispatch_service as ds
+from app.api_planning import sched_day_type
 
 
 def _seed_order(con, date="2026-08-09"):
@@ -93,5 +94,35 @@ def test_empty_board_without_approved_order(tmp_path):
     try:
         board = ds.build_board(con, "2026-08-09")
         assert board["has_order"] is False and board["rows"] == []
+    finally:
+        con.close()
+
+
+def _seed_trips(con, route_id, day_type):
+    con.executemany(
+        "INSERT INTO route_trips(route_id,day_type,output_number,shift_number,trip_number,dep_time,arr_time) "
+        "VALUES(?,?,?,?,?,?,?)",
+        [(route_id, day_type, 1, 1, 1, "06:00", "06:30"),
+         (route_id, day_type, 1, 1, 2, "07:00", "07:30")])
+    con.commit()
+
+
+def test_trip_facts_plan_and_on_time(tmp_path):
+    con = _open_db(tmp_path)
+    try:
+        date, line, route_id, _ = _seed_order(con)
+        _seed_trips(con, route_id, sched_day_type(con, date))
+        ds.build_board(con, date)
+        facts = ds.list_trip_facts(con, date, line)
+        assert [f["trip_number"] for f in facts] == [1, 2]
+        assert facts[0]["plan_dep"] == "06:00"
+        saved = ds.set_trip_fact(con, line, 1, "06:01", date=date, user="disp")
+        con.commit()
+        assert saved["deviation_min"] == 1 and saved["on_time"] == 1
+        late = ds.set_trip_fact(con, line, 2, "07:05", date=date, user="disp")
+        con.commit()
+        assert late["deviation_min"] == 5 and late["on_time"] == 0
+        summary = ds.day_summary(con, date)
+        assert summary["trip_regularity"] == 50.0
     finally:
         con.close()
