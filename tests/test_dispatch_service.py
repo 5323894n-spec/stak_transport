@@ -126,3 +126,30 @@ def test_trip_facts_plan_and_on_time(tmp_path):
         assert summary["trip_regularity"] == 50.0
     finally:
         con.close()
+
+
+def test_telemetry_applies_in_gps_mode_only(tmp_path):
+    con = _open_db(tmp_path)
+    try:
+        date, line, route_id, bus_id = _seed_order(con)
+        ds.build_board(con, date)
+        with pytest.raises(ds.DispatchError):
+            ds.apply_telemetry(con, {"date": date, "garage_number": "Г1", "event": "release", "time": "06:00"}, user="gw")
+        ds.set_source_mode(con, date, "gps", user="admin"); con.commit()
+        out = ds.apply_telemetry(con, {"date": date, "garage_number": "Г1", "event": "release", "time": "06:03"}, user="gw")
+        con.commit()
+        assert out["status"] == "выпущен" and out["actual_release"] == "06:03" and out["deviation_min"] == 13
+    finally:
+        con.close()
+
+
+def test_telemetry_unknown_vehicle(tmp_path):
+    con = _open_db(tmp_path)
+    try:
+        date, *_ = _seed_order(con)
+        ds.set_source_mode(con, date, "gps", user="admin")
+        ds.build_board(con, date); con.commit()
+        with pytest.raises(ds.DispatchError):
+            ds.apply_telemetry(con, {"date": date, "garage_number": "НЕТ", "event": "release"}, user="gw")
+    finally:
+        con.close()

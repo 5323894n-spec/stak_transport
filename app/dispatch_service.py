@@ -210,6 +210,58 @@ def set_trip_fact(con, order_line_id, trip_number, actual_dep, *, date, user):
     }
 
 
+def _line_by_vehicle(con, date, payload):
+    order = _approved_order(con, date)
+    if order is None:
+        raise DispatchError("Наряд на дату не найден")
+    if payload.get("vehicle_id"):
+        row = con.execute(
+            "SELECT id FROM order_lines WHERE order_id=? AND bus_id=?",
+            (order["id"], payload["vehicle_id"]),
+        ).fetchone()
+    else:
+        row = con.execute(
+            "SELECT l.id FROM order_lines l JOIN buses b ON b.id=l.bus_id "
+            "WHERE l.order_id=? AND b.garage_number=?",
+            (order["id"], payload.get("garage_number")),
+        ).fetchone()
+    if row is None:
+        raise DispatchError("Автобус не найден в наряде на дату")
+    return row["id"]
+
+
+def apply_telemetry(con, payload, *, user):
+    date = payload.get("date")
+    day = ensure_day(con, date)
+    if day["source_mode"] != "gps":
+        raise DispatchError("Телеметрия принимается только в режиме GPS")
+    event = payload.get("event")
+    if event == "trip_departure":
+        line_id = _line_by_vehicle(con, date, payload)
+        return set_trip_fact(
+            con, line_id, int(payload["trip_number"]), payload.get("time"),
+            date=date, user=user,
+        )
+    if event not in _TELEMETRY_STATUS:
+        raise DispatchError("Неизвестное событие телеметрии")
+    line_id = _line_by_vehicle(con, date, payload)
+    output = con.execute(
+        "SELECT id FROM dispatch_outputs WHERE order_line_id=?", (line_id,)
+    ).fetchone()
+    if output is None:
+        build_board(con, date)
+        output = con.execute(
+            "SELECT id FROM dispatch_outputs WHERE order_line_id=?", (line_id,)
+        ).fetchone()
+    reason = payload.get("reason") or (
+        "GPS" if event in ("off_line", "disruption") else None
+    )
+    return set_output_status(
+        con, output["id"], _TELEMETRY_STATUS[event],
+        at=payload.get("time"), reason=reason, user=user,
+    )
+
+
 def day_summary(con, date):
     board = build_board(con, date)
     summary = dict(board["summary"])
