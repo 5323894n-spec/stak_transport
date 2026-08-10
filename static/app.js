@@ -190,6 +190,19 @@ async function textModal(title, label, value = "", note = "") {
 const tbl = (headers, rowsHtml) =>
   `<div class="tbl-wrap"><table class="grid"><thead><tr>${headers.map(h => `<th>${h}</th>`).join("")}</tr></thead><tbody>${rowsHtml}</tbody></table></div>`;
 const sevBadge = (s) => `<span class="badge ${s === "критично" ? "b-err" : s === "ошибка" ? "b-warn" : "b-mut"}">${s}</span>`;
+const CHECK_KIND_LABELS = {
+  missing_fields: "не заполнены поля рейса",
+  missing_stop_times: "нет времени по остановкам",
+  invalid_stop_sequence: "нарушен порядок остановок",
+  duplicate_trip_number: "повтор номера рейса",
+  break_gap: "рейс раньше окончания перерыва",
+  overlap: "наложение рейсов",
+  short_rest: "малый межрейсовый отстой",
+  long_output_without_shift_split: "длинный выход без деления на смены",
+  missing_lunch: "нет обеденного перерыва",
+  large_interval_gap: "большой интервал движения",
+};
+function checkKindLabel(kind) { return CHECK_KIND_LABELS[kind] || kind; }
 const stBadge = (s) => {
   const m = { "утвержден": "b-ok", "выдан": "b-inf", "выполнен": "b-ok", "черновик": "b-mut", "аннулирован": "b-err",
     "оформлен": "b-inf", "скорректирован": "b-warn", "отменен": "b-err", "не сформирован": "b-mut" };
@@ -1545,7 +1558,7 @@ VIEWS.schedule = async function () {
       <td>${t.output_number}</td><td>${t.shift_number}</td><td>${t.trip_number}</td><td>${esc(t.direction)}</td>
       <td>${t.dep_time}</td><td>${t.arr_time}</td><td>${t.distance_km}</td>
       <td>${t.break_after_min || 0}${btype ? " (" + esc(btype) + ")" : ""}</td>
-      <td>${p ? sevBadge(p.severity) + " " + esc(p.kind) : '<span class="badge b-ok">ok</span>'}</td>
+      <td>${p ? sevBadge(p.severity) + " " + esc(checkKindLabel(p.kind)) : '<span class="badge b-ok">ok</span>'}</td>
       <td><button class="btn small ghost" onclick='tripEdit(${JSON.stringify(t).replace(/'/g, "&#39;")})'>\u0438\u0437\u043c.</button>
           <button class="btn small ghost" onclick="tripDel(${t.id})">\u2715</button></td></tr>`;
   }).join("");
@@ -1585,7 +1598,7 @@ VIEWS.schedule = async function () {
       </div>
       <div>
         <div class="panel"><h3>\u041e\u0448\u0438\u0431\u043a\u0438 \u0438 \u0440\u0435\u043a\u043e\u043c\u0435\u043d\u0434\u0430\u0446\u0438\u0438</h3>${chk.problems.length ? chk.problems.map(p =>
-          `<div class="vio ${p.severity === "\u043f\u0440\u0435\u0434\u0443\u043f\u0440\u0435\u0436\u0434\u0435\u043d\u0438\u0435" ? "w" : ""}"><b>${sevBadge(p.severity)} ${esc(p.kind)}</b>${esc(p.message)}<br><span class="muted">${esc(p.recommendation || "")}</span></div>`).join("") : '<span class="badge b-ok">\u0417\u0430\u043c\u0435\u0447\u0430\u043d\u0438\u0439 \u043d\u0435 \u043d\u0430\u0439\u0434\u0435\u043d\u043e</span>'}</div>
+          `<div class="vio ${p.severity === "\u043f\u0440\u0435\u0434\u0443\u043f\u0440\u0435\u0436\u0434\u0435\u043d\u0438\u0435" ? "w" : ""}"><b>${sevBadge(p.severity)} ${esc(checkKindLabel(p.kind))}</b>${esc(p.message)}<br><span class="muted">${esc(p.recommendation || "")}</span></div>`).join("") : '<span class="badge b-ok">\u0417\u0430\u043c\u0435\u0447\u0430\u043d\u0438\u0439 \u043d\u0435 \u043d\u0430\u0439\u0434\u0435\u043d\u043e</span>'}</div>
     ${schedulePeriodPreviewPanel(st)}
         <div class="panel"><h3>\u0412\u044b\u0445\u043e\u0434\u044b \u0438 \u0441\u043c\u0435\u043d\u044b</h3>${tbl(["\u0412\u044b\u0445\u043e\u0434", "\u0421\u043c\u0435\u043d\u0430", "\u0412\u0440\u0435\u043c\u044f", "\u0420\u0435\u0439\u0441\u043e\u0432", "\u041a\u043c", "\u0427\u0430\u0441\u044b", "\u041d\u043e\u0447\u043d\u044b\u0435"], outs)}</div>
       </div>
