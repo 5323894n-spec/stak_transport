@@ -72,7 +72,8 @@ echo Starting server. Keep this window open while using the program.
 echo Login: admin / admin
 echo.
 start "" /min powershell -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -Command "Start-Sleep -Seconds 2; Start-Process '%URL%'"
-"%PYTHON%" run.py --port %PORT%
+rem --demo seeds the database on first run and is skipped once data exists
+"%PYTHON%" run.py --demo --port %PORT%
 
 echo.
 echo Server stopped.
